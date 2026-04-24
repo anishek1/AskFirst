@@ -1,49 +1,47 @@
-# Clary — Approach and Failure Analysis
+# Clary — Execution Writeup & Failure Analysis
 
-## Approach to the Reasoning Problem
+This document addresses the mandatory submission requirements, detailing the reasoning approach, context strategy, honest failure analysis, and proposed future improvements.
 
-**The core challenge** is that raw conversation text, naively concatenated, loses temporal signal. The sentence "my stomach hurt this week" in January means something different from the same sentence in March, and the gap matters when looking for delayed effects like telogen effluvium (calorie restriction → hair fall at 6 weeks).
+## 1. Approach to the Reasoning Problem
 
-### Pre-computed Temporal Metadata
+### No Hardcoded Patterns & Dynamic Generation
+Clary relies completely on dynamic analysis of the historical data log. No pre-defined symptom lists or medical rulesets (e.g., "if coffee then heartburn") are hardcoded into the application logic. The logic isolates chronological session data and forces the LLM to identify statistically significant sequences (triggers followed by symptoms) and highlight negative evidence (triggers without symptoms).
 
-Before any LLM call, `temporal_engine.py` converts each session timestamp into four pre-computed fields:
-- **Week number** (1-indexed from user's first session)
-- **Day delta** (calendar days since first session)
-- **Absolute date and weekday**
-- **Time-of-day label**: `LATE-NIGHT (11pm–4am)`, `MORNING`, `AFTERNOON`, `EVENING`
+### Model Selection & Rationale
+**Chosen LLM:** **NVIDIA Nemotron-3-Nano-30B-A3B**
+**Why:**
+- **Efficiency & Throughput:** Nemotron-3-Nano uses a 30B-parameter hybrid MoE architecture combining Mamba-2 and Transformer layers, but incredibly only activates ~3.5B parameters during token generation. This provides frontier-level reasoning depth with exceptionally low latency, which is essential for a fluid, streaming conversational UX.
+- **In-Context Learning & Temporal Scope:** The temporal correlation rules (e.g., checking day-deltas and negative evidence across longitudinal patient timelines) demand intense contextual grasp. Nemotron's massive context window enables it to easily hold the entire 5K+ token chronological history in active memory without degradation.
+- **Explicit Reasoning Traces:** Nemotron natively excels at multi-step logic and structured data processing. With extended thinking features enabled, it strictly follows the 8-step reasoning framework, successfully constructing deductive reasoning traces before outputting structured JSON patterns.
 
-This means the LLM receives headers like `[Week 1 | Day 0 | 2026-01-05 Mon 23:14 | LATE-NIGHT]` rather than ISO timestamps. Pattern P1 (late-night eating → acidity) becomes structurally visible because all four acidity sessions share the `LATE-NIGHT` label. Pattern P3 (calorie restriction → hair fall) becomes explicit because the header shows "Day 0" and "Day 45" rather than two ISO strings requiring subtraction.
+### Chunking and Context Management Strategy
+**Strategy:** **No Chunking. Single-Pass Full Context.**
+- **Why:** Naive RAG or fixed-window chunking breaks long-term temporal dependencies. For instance, Pattern P3 (Meera's calorie restriction → hair fall) requires linking a cause in Session 1 (Jan 8) to an effect in Session 6 (Feb 19). A 42-day gap would inevitably fall across chunk boundaries, effectively blinding the model to the causation. Because all sessions per patient easily fit within a modern context window (~5K tokens), the system passes the *entire* patient chronologic history in a single shot.
+- **Context Management in Conversation:** Once the initial timeline is processed, it is embedded permanently in the **System Prompt**. During multi-turn follow-ups, the user's conversational turns are appended, but the full health history remains fixed in the system memory. This ensures the model can answer localized follow-up questions ("When did Priya first report cramps?") without external retrieval mechanisms or hallucinations.
 
-### Two-Phase Streaming
-
-The system prompt instructs Claude to complete a 9-step reasoning chain first, then output JSON. The state machine in `pattern_detector.py` detects the ` ```json ` fence to split the stream into a live reasoning display and a final pattern card render. This satisfies the `trace` field requirement without a separate API call.
-
-### No Chunking
-
-All sessions per user fit in a single context window call (~5K tokens). Chunking would sever the P3 connection (Jan 8 diary → Feb 19 hair fall) because the two sessions would land in different chunks. The "chunking" decision is made at the extraction layer instead: structured timeline tuples replace raw message dumps.
-
-### Negative Evidence Instruction
-
-The system prompt explicitly asks for "sessions where trigger was present but symptom absent, or trigger absent and symptom absent." This is the mechanism that pushes P1 and P2 to `high` confidence — Claude can observe that Arjun's non-deadline sessions show no acidity and non-busy-week sessions show no headaches.
+### Temporal Pre-computation & The Reasoning Trace
+Raw text limits an LLM's grasp of time. Before any LLM call, `temporal_engine.py` enriches each session with structural time tokens: `[Week X | Day Y | Date | Time-of-Day]`. The model is forced to explicitly output a full **reasoning trace** array before formulating its final confidence score to ensure we see *what* the system considered (e.g., verifying day-deltas and absent symptoms) before it reaches a conclusion.
 
 ---
 
-## Where the System Fails or Hallucinates
+## 2. Where the System Fails or Hallucinates Confidently
 
-### P3 vs P8 Conflation (Meera)
-P3 is "calorie restriction → hair fall at Day 41" and P8 is "calorie restriction → cascade (Day 1 dizziness → Week 5 fatigue/brain fog → Week 6 hair fall)." These share the same root cause and terminal symptom. Claude may output them as one merged pattern or omit the cascade framing of P8 entirely. The distinction requires recognizing that dizziness (Day 1), fatigue (Week 5), and hair fall (Week 6) are three separate downstream effects of the same trigger at different biological delays — a reasoning pattern that requires holding the root cause in mind across multiple sessions simultaneously.
+A system optimized for pattern discovery naturally biases toward false positives. Here is an honest assessment of current failure modes:
 
-### Telogen Effluvium Timeline
-The dataset shows calorie restriction starting Jan 8 (Day 0) and hair fall first reported Feb 19 (Day 42). Medical literature puts telogen effluvium onset at 6–12 weeks (42–84 days), so Day 42 is at the early edge. The LLM may either accept the dataset's framing uncritically or incorrectly flag the 6-week delay as too short. The system does not inject medical knowledge, so this is a known blind spot.
+### False Positives on Single-Session Symptoms
+Because the system is explicitly prompted to "find patterns," it will occasionally over-index on isolated events. For example, if Arjun reports back pain once after a long day at his desk (S03), the model will sometimes elevate this to a `MEDIUM` confidence pattern. It understands the cause-and-effect plausibility but fails to apply the strict statistical rigor (e.g., "this only happened once") without explicit code-level suppression.
 
-### P6b — Sleep as Independent Cramp Driver (Priya)
-Pattern P6b requires distinguishing two drivers of Priya's menstrual cramps: work stress (P6, confirmed across two months) and sleep deprivation as an *independent* driver (confirmed in Session 9 where stress was explicitly low but sleep was still poor and cramps were severe). This requires the model to hold a controlled-variable comparison across the full session history. In practice, Claude may conflate P6 and P6b into a single "stress + sleep → cramps" pattern, losing the independence claim that makes P6b a separate finding.
+### Conflating Independent Health Drivers (Priya's Cramps)
+Pattern P8 relies on identifying sleep deprivation as a completely independent driver of menstrual cramps, separate from work stress (P6). The LLM often merges these into a single "Stress + Poor Sleep → Cramps" meta-pattern, hallucinating that they are inextricably linked despite data explicitly separating them (e.g., in Session 9). The system struggles to run controlled-variable comparisons across a dense session history.
 
-### P7 Cascade Ordering (Priya)
-Pattern P7 is a three-step cascade: late-night screens (mid-Jan) → sleep deprivation → all-day fatigue (Week 5) → anxiety (Week 7) → worsened cramps (Month 3). The cascade only makes sense if the model correctly sequences five symptoms across seven weeks and identifies screens as the single upstream cause. The model may detect the individual symptoms without connecting them into a chain, outputting three separate `LOW` confidence patterns instead of one `HIGH` confidence cascade.
+### Misinterpreting Cascade Temporal Delays (Telogen Effluvium)
+Medical literature dictates a 6–12 week delay for stress-induced hair loss. Meera's hair fall at Day 42 sits exactly at the 6-week boundary. The model will sometimes confidently claim the timeline is "too short" to be the root cause and downgrade the confidence improperly, or conversely, ignore the biological delay completely and treat it as a coincidental correlation.
 
-### False Positives
-The system has no hardcoded pattern suppression. On Arjun's sessions, back pain (S03) and fatigue (S05) appear once each with plausible but weak triggers (sedentary work, late bedtime). Claude may elevate these to `MEDIUM` confidence patterns. The confidence rubric (3+ episodes = HIGH, 2 = MEDIUM, 1 = LOW) is stated in the prompt but is not enforced mechanically — it relies on the LLM self-applying the rule correctly.
+---
 
-### JSON Parsing Robustness
-The state machine uses string search for ` ```json ` and ` ``` ` delimiters. If the model outputs the JSON block without fences (rare but possible), or inserts a code comment inside the block, the parser will either return the full raw text as an error or silently truncate. This is a known gap — a fallback `json.loads` pass on the full accumulated text would recover these cases but is not currently implemented.
+## 3. What Would Be Built Differently With More Time
+
+1. **Multi-Pass Reasoning (Agentic Cascades):** Instead of a single-shot extraction, implement an agentic workflow where LLM Pass 1 extracts isolated symptom/trigger pairs, and LLM Pass 2 is solely tasked with constructing the causal chain/cascades from the isolated pairs. This would resolve the P8 conflation issue.
+2. **Native Structured Output APIs:** Currently, JSON extraction involves string parsing (`_extract_json`). With more time, I would migrate all provider endpoints to use native structured output enforcements (e.g., OpenAI `response_format` or Anthropic `tool_use`) to completely eliminate the risk of JSON parsing crashes due to hallucinated markdown.
+3. **Controlled-Variable Prompt Architecture:** Introduce a mandatory "Negative Space" reasoning requirement where the model must explicitly locate a session where the trigger was *absent* before it is allowed to assign a `HIGH` confidence badge.
+4. **Automated Evaluation Harness:** Develop a ground-truth eval script measuring recall vs. precision against the 8 known, implanted patterns across the 3 synthetic users to iterate on the system prompt systematically rather than anecdotally.

@@ -1,3 +1,13 @@
+"""
+llm_provider.py — Abstract LLM provider with Anthropic / OpenAI / Gemini / Ollama backends.
+
+Each provider exposes two methods:
+  stream_text  — single-turn (convenience wrapper around chat_stream)
+  chat_stream  — multi-turn, accepts message history list
+
+Yields: ("thinking", chunk) | ("content", chunk)
+"""
+
 from abc import ABC, abstractmethod
 from typing import Generator
 import os
@@ -8,9 +18,20 @@ class LLMProvider(ABC):
     def stream_text(
         self, system: str, user: str, max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
-        """Yields ("thinking", chunk) | ("content", chunk)."""
+        """Single-turn convenience wrapper. Yields ("thinking"|"content", chunk)."""
+
+    @abstractmethod
+    def chat_stream(
+        self, system: str, messages: list[dict], max_tokens: int
+    ) -> Generator[tuple[str, str], None, None]:
+        """
+        Multi-turn streaming.
+        messages = [{"role": "user"|"assistant", "content": str}, ...]
+        Yields ("thinking"|"content", chunk).
+        """
 
 
+# ── Anthropic ─────────────────────────────────────────────────────────────────
 class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: str, model: str):
         import anthropic
@@ -20,16 +41,24 @@ class AnthropicProvider(LLMProvider):
     def stream_text(
         self, system: str, user: str, max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
+        yield from self.chat_stream(
+            system, [{"role": "user", "content": user}], max_tokens
+        )
+
+    def chat_stream(
+        self, system: str, messages: list[dict], max_tokens: int
+    ) -> Generator[tuple[str, str], None, None]:
         with self._client.messages.stream(
             model=self._model,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user}],
+            messages=messages,
         ) as stream:
             for text in stream.text_stream:
                 yield ("content", text)
 
 
+# ── OpenAI / OpenAI-compatible (NVIDIA NIM, etc.) ────────────────────────────
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -48,13 +77,18 @@ class OpenAIProvider(LLMProvider):
     def stream_text(
         self, system: str, user: str, max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
+        yield from self.chat_stream(
+            system, [{"role": "user", "content": user}], max_tokens
+        )
+
+    def chat_stream(
+        self, system: str, messages: list[dict], max_tokens: int
+    ) -> Generator[tuple[str, str], None, None]:
+        openai_messages = [{"role": "system", "content": system}] + messages
         kwargs: dict = dict(
             model=self._model,
             max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            messages=openai_messages,
             stream=True,
             temperature=1,
             top_p=1,
@@ -69,6 +103,7 @@ class OpenAIProvider(LLMProvider):
         for chunk in response:
             if not chunk.choices:
                 continue
+            # Some providers (NVIDIA, DeepSeek) surface reasoning in a separate field
             reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
             if reasoning:
                 yield ("thinking", reasoning)
@@ -77,6 +112,7 @@ class OpenAIProvider(LLMProvider):
                 yield ("content", content)
 
 
+# ── Google Gemini ─────────────────────────────────────────────────────────────
 class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, model: str):
         import google.generativeai as genai
@@ -86,17 +122,34 @@ class GeminiProvider(LLMProvider):
     def stream_text(
         self, system: str, user: str, max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
+        yield from self.chat_stream(
+            system, [{"role": "user", "content": user}], max_tokens
+        )
+
+    def chat_stream(
+        self, system: str, messages: list[dict], max_tokens: int
+    ) -> Generator[tuple[str, str], None, None]:
         import google.generativeai as genai
+
         model = genai.GenerativeModel(
             model_name=self._model_name,
             system_instruction=system,
             generation_config={"max_output_tokens": max_tokens},
         )
-        for chunk in model.generate_content(user, stream=True):
+        # Convert to Gemini's history format (all messages except the last)
+        history = []
+        for msg in messages[:-1]:
+            role = "user" if msg["role"] == "user" else "model"
+            history.append({"role": role, "parts": [msg["content"]]})
+
+        last_content = messages[-1]["content"] if messages else ""
+        chat = model.start_chat(history=history)
+        for chunk in chat.send_message(last_content, stream=True):
             if chunk.text:
                 yield ("content", chunk.text)
 
 
+# ── Ollama ────────────────────────────────────────────────────────────────────
 class OllamaProvider(LLMProvider):
     def __init__(self, model: str, base_url: str = "http://localhost:11434"):
         self._model = model
@@ -105,15 +158,20 @@ class OllamaProvider(LLMProvider):
     def stream_text(
         self, system: str, user: str, max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
+        yield from self.chat_stream(
+            system, [{"role": "user", "content": user}], max_tokens
+        )
+
+    def chat_stream(
+        self, system: str, messages: list[dict], max_tokens: int
+    ) -> Generator[tuple[str, str], None, None]:
         import json
         import urllib.request
 
+        all_messages = [{"role": "system", "content": system}] + messages
         payload = json.dumps({
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": all_messages,
             "stream": True,
             "options": {"num_predict": max_tokens},
         }).encode()
@@ -132,6 +190,7 @@ class OllamaProvider(LLMProvider):
                         yield ("content", text)
 
 
+# ── Factory ───────────────────────────────────────────────────────────────────
 def get_provider() -> LLMProvider:
     provider_name = os.getenv("LLM_PROVIDER", "anthropic").lower()
     api_key = os.getenv("LLM_API_KEY", "")

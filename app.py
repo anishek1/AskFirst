@@ -1,5 +1,17 @@
+"""
+app.py — Clary: Health Pattern Analyst (Conversational Streamlit App)
+
+UX flow per user:
+  1. User selects a patient from the sidebar.
+  2. Each session is inserted chronologically with pre-computed temporal labels (animated).
+  3. Clary performs an initial full pattern analysis (streamed with live reasoning trace).
+  4. The user can ask unlimited follow-up questions; the full conversation history is
+     maintained per patient and sent to the LLM on every turn.
+"""
+
 import json
 import os
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -9,193 +21,755 @@ load_dotenv()
 
 from src.data_loader import load_dataset, User
 from src.llm_provider import get_provider
-from src.pattern_detector import stream_pattern_detection
-from src.temporal_engine import build_temporal_timeline
+from src.chat_engine import (
+    build_system_prompt,
+    build_initial_user_message,
+    stream_response,
+)
+from src.temporal_engine import (
+    compute_reference_date,
+    get_week_number,
+    get_day_delta,
+    get_time_of_day_label,
+)
 
 DATASET_PATH = Path(__file__).parent / "Task" / "askfirst_synthetic_dataset.json"
 
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Clary — Health Pattern Detector",
-    page_icon="",
+    page_title="Clary · Ask First",
+    page_icon="🩺",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+/* ── Root overrides ─────────────────────────────────────── */
+html, body, [class*="css"] { 
+    font-family: 'Inter', sans-serif !important; 
+    color: #e2e8f0;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Outfit', sans-serif !important;
+    letter-spacing: -0.02em;
+}
+
+/* Dark app background with subtle gradient */
+.stApp { 
+    background: radial-gradient(circle at top right, #0f172a 0%, #020617 100%);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: rgba(15, 23, 42, 0.4) !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+[data-testid="stSidebar"] .block-container { padding: 2rem 1.5rem; }
+
+/* ── Main content ────────────────────────────────────────── */
+.main .block-container {
+    max-width: 900px;
+    padding-top: 2rem;
+    padding-bottom: 5rem;
+}
+
+/* ── Chat messages (Glassmorphism) ───────────────────────── */
+[data-testid="stChatMessage"] {
+    border-radius: 16px;
+    padding: 1.2rem 1.5rem;
+    margin: 0.75rem 0;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+@keyframes fadeIn { 
+    from { opacity: 0; transform: translateY(12px); } 
+    to { opacity: 1; transform: translateY(0); } 
+}
+
+/* Assistant Bubble */
+[data-testid="stChatMessage"][data-test-message-author-type="assistant"] {
+    background: linear-gradient(145deg, rgba(14, 165, 233, 0.08) 0%, rgba(2, 132, 199, 0.02) 100%);
+    border-left: 2px solid #0ea5e9;
+}
+
+/* User Bubble */
+[data-testid="stChatMessage"][data-test-message-author-type="human"] {
+    background: rgba(255, 255, 255, 0.02);
+    border-right: 2px solid #64748b;
+}
+
+/* ── Chat Input ──────────────────────────────────────────── */
+[data-testid="stChatInput"] {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(2, 6, 23, 0.8);
+    backdrop-filter: blur(16px);
+    padding-bottom: 2rem;
+}
+[data-testid="stChatInput"] textarea {
+    background: rgba(15, 23, 42, 0.6) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 14px !important;
+    color: #f8fafc !important;
+    font-size: 1.05em !important;
+    padding: 0.8rem 1.2rem !important;
+    transition: all 0.2s ease;
+}
+[data-testid="stChatInput"] textarea:focus {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15), 0 0 20px rgba(56, 189, 248, 0.1) !important;
+    background: rgba(15, 23, 42, 0.8) !important;
+}
+
+/* ── Buttons (Premium Glow) ──────────────────────────────── */
+.stButton > button {
+    border-radius: 12px;
+    font-family: 'Outfit', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    font-size: 0.95em;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    background: rgba(30, 41, 59, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    padding: 0.6rem 1.2rem;
+}
+.stButton > button:hover {
+    background: rgba(30, 41, 59, 0.8);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #f8fafc;
+    transform: translateY(-1px);
+}
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+    box-shadow: 0 4px 14px rgba(2, 132, 199, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 6px 20px rgba(2, 132, 199, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    transform: translateY(-2px);
+    background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+}
+
+/* ── Expanders (Pattern Cards) ───────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 14px !important;
+    background: rgba(15, 23, 42, 0.3) !important;
+    backdrop-filter: blur(8px);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden;
+    margin-bottom: 1rem;
+}
+[data-testid="stExpander"]:hover {
+    border-color: rgba(14, 165, 233, 0.3) !important;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+[data-testid="stExpander"] summary { 
+    color: #f1f5f9; 
+    font-family: 'Outfit', sans-serif;
+    padding: 1rem 1.2rem !important;
+    background: rgba(255, 255, 255, 0.02);
+}
+[data-testid="stExpander"] summary:hover { color: #38bdf8; }
+
+/* ── High/Med/Low Confidence Accents ─────────────────────── */
+[data-testid="stExpander"]:has(p:contains("HIGH")) { border-left: 3px solid #10b981 !important; }
+[data-testid="stExpander"]:has(p:contains("MED")) { border-left: 3px solid #f59e0b !important; }
+[data-testid="stExpander"]:has(p:contains("LOW")) { border-left: 3px solid #ef4444 !important; }
+
+/* ── Code & Inline Code ──────────────────────────────────── */
+code {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 0.15rem 0.4rem;
+    font-size: 0.85em;
+    color: #7dd3fc;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+/* ── Status Widget ───────────────────────────────────────── */
+[data-testid="stStatusWidget"] {
+    background: rgba(15, 23, 42, 0.4) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 14px !important;
+    backdrop-filter: blur(8px);
+}
+
+/* ── Info / Success Boxes ────────────────────────────────── */
+[data-testid="stInfo"] {
+    background: rgba(14, 165, 233, 0.05) !important;
+    border: 1px solid rgba(14, 165, 233, 0.2) !important;
+    border-radius: 10px !important;
+    color: #e2e8f0 !important;
+}
+[data-testid="stSuccess"] {
+    background: rgba(16, 185, 129, 0.05) !important;
+    border: 1px solid rgba(16, 185, 129, 0.2) !important;
+    border-radius: 10px !important;
+}
+
+/* ── Reasoning Trace (Details/Summary) ───────────────────── */
+details > summary {
+    cursor: pointer;
+    font-size: 0.85em;
+    color: #94a3b8;
+    padding: 6px 0;
+    user-select: none;
+    list-style: none;
+    font-family: 'Outfit', sans-serif;
+    letter-spacing: 0.02em;
+    transition: color 0.2s ease;
+}
+details > summary::before { content: "⚡ "; font-size: 1.1em; vertical-align: middle; }
+details > summary:hover { color: #38bdf8; }
+details pre {
+    background: rgba(2, 6, 23, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.78em;
+    color: #94a3b8;
+    white-space: pre-wrap;
+    max-height: 250px;
+    overflow-y: auto;
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    line-height: 1.6;
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.2);
+}
+
+/* ── Metrics ──────────────────────────────────────────────── */
+[data-testid="stMetricValue"] { 
+    color: #e2e8f0; 
+    font-family: 'Outfit', sans-serif;
+    font-weight: 700; 
+    font-size: 2.2rem;
+}
+[data-testid="stMetricLabel"] {
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+/* ── Divider ──────────────────────────────────────────────── */
+hr { 
+    border-color: rgba(255, 255, 255, 0.08); 
+    margin: 1.5rem 0; 
+}
+
+/* ── Typographic elements ────────────────────────────────── */
+.gradient-text {
+    background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 700;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ── Session-state helpers ─────────────────────────────────────────────────────
+
+def _init_state() -> None:
+    if "selected_uid" not in st.session_state:
+        st.session_state.selected_uid = None
+    if "chats" not in st.session_state:
+        st.session_state.chats = {}  # uid → chat dict
+
+
+def _get_chat(uid: str) -> dict:
+    """Return (creating if necessary) the chat state dict for a user."""
+    if uid not in st.session_state.chats:
+        st.session_state.chats[uid] = {
+            "system":       "",    # full system prompt with timeline
+            "messages":     [],    # display dicts: {role, content, thinking, type}
+            "llm_messages": [],    # sent to LLM: [{role, content}]
+            "done":         False, # True after initial analysis completes
+        }
+    return st.session_state.chats[uid]
+
+
+# ── Dataset loader (cached) ───────────────────────────────────────────────────
 
 @st.cache_data
-def get_dataset() -> list[User]:
+def _load_users() -> list[User]:
     return load_dataset(str(DATASET_PATH))
 
 
-def confidence_badge(level: str) -> str:
-    icons = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
-    colors = {"high": "green", "medium": "orange", "low": "red"}
-    label = icons.get(level.lower(), level.upper())
-    color = colors.get(level.lower(), "gray")
-    return f":{color}[{label}]"
+@st.cache_resource
+def _get_provider():
+    return get_provider()
 
 
-def render_patterns(patterns_json: str) -> None:
+# ── JSON extraction helper ────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> str | None:
+    """Extract JSON from ```json ... ``` fences, or return bare object if present."""
+    if "```json" in text:
+        start = text.index("```json") + len("```json")
+        remainder = text[start:]
+        end = remainder.index("```") if "```" in remainder else len(remainder)
+        return remainder[:end].strip()
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        return stripped
+    return None
+
+
+# ── Pattern card renderer ─────────────────────────────────────────────────────
+
+_CONF_ICON  = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+_CONF_BADGE = {"high": "HIGH ▲", "medium": "MED  ◆", "low": "LOW  ▼"}
+
+
+def _render_patterns(json_str: str) -> None:
+    """Render interactive pattern cards from a JSON string."""
     try:
-        data = json.loads(patterns_json)
-    except json.JSONDecodeError as e:
-        st.error(f"JSON parse error: {e}")
-        st.code(patterns_json, language="json")
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        st.warning("⚠️ Could not parse pattern JSON — showing raw output.")
+        st.code(json_str, language="json")
         return
 
     patterns = data.get("patterns", [])
     if not patterns:
-        st.warning("No patterns detected.")
+        st.warning("No patterns were detected in this analysis run.")
         return
 
-    st.success(f"Detected {len(patterns)} pattern(s)")
+    conf_counts = {}
+    for p in patterns:
+        c = p.get("confidence", "low").lower()
+        conf_counts[c] = conf_counts.get(c, 0) + 1
+
+    # Summary header
+    cols = st.columns(4)
+    cols[0].metric("Patterns found", len(patterns))
+    cols[1].metric("🟢 High", conf_counts.get("high", 0))
+    cols[2].metric("🟡 Medium", conf_counts.get("medium", 0))
+    cols[3].metric("🔴 Low", conf_counts.get("low", 0))
+
+    st.markdown("")
 
     for p in patterns:
-        conf = p.get("confidence", "low").lower()
-        badge = confidence_badge(conf)
-        pid = p.get("pattern_id", "?")
-        title = p.get("title", "")
+        conf   = p.get("confidence", "low").lower()
+        icon   = _CONF_ICON.get(conf, "⚪")
+        badge  = _CONF_BADGE.get(conf, conf.upper())
+        pid    = p.get("pattern_id", "?")
+        title  = p.get("title", "Untitled pattern")
 
-        with st.expander(f"**{pid}** — {title}   [{badge}]", expanded=True):
-            col1, col2 = st.columns([3, 2])
+        with st.expander(f"{icon} **{pid}** · {title}  `{badge}`", expanded=True):
+            left, right = st.columns([3, 2])
 
-            with col1:
-                st.markdown("**Temporal Reasoning**")
-                st.markdown(p.get("temporal_reasoning", ""))
-                st.markdown("**Confidence Justification**")
-                st.info(p.get("confidence_justification", ""))
+            with left:
+                st.markdown("**📅 Temporal Reasoning**")
+                st.markdown(p.get("temporal_reasoning", "—"))
+                st.markdown("**🔍 Confidence Justification**")
+                st.info(p.get("confidence_justification", "—"))
 
-            with col2:
-                st.markdown("**Sessions Involved**")
+            with right:
+                st.markdown("**📋 Sessions Involved**")
                 for sid in p.get("sessions_involved", []):
                     st.code(sid, language=None)
-                st.markdown("**Reasoning Trace**")
+                st.markdown("**🧠 Reasoning Trace**")
                 for i, step in enumerate(p.get("trace", []), 1):
-                    st.markdown(f"`{i}.` {step}")
+                    st.caption(f"{i}. {step}")
 
 
-def run_analysis(user: User) -> None:
-    try:
-        provider = get_provider()
-    except Exception as e:
-        st.error(f"Provider error: {e}\n\nCheck your .env file matches .env.example")
+# ── Data-ingestion animation ──────────────────────────────────────────────────
+
+def _animate_data_load(user: User) -> None:
+    """
+    Show each session being inserted in chronological order with temporal labels.
+    This visually represents the temporal indexing that underpins Clary's reasoning.
+    """
+    sessions = sorted(user.sessions, key=lambda s: s.timestamp)
+    ref = compute_reference_date(sessions)
+
+    with st.status(
+        f"📥  Ingesting temporal data for **{user.name}** ({len(sessions)} sessions)…",
+        expanded=True,
+    ) as status:
+        for s in sessions:
+            week = get_week_number(s, ref)
+            day  = get_day_delta(s, ref)
+            tod  = get_time_of_day_label(s)
+            tags = " · ".join(s.tags[:3]) if s.tags else "—"
+
+            st.markdown(
+                f"<span style='font-family:monospace;font-size:0.82em;"
+                f"color:#005f73'>[W{week:02d}/D{day:03d}]</span>&nbsp;"
+                f"<strong style='color:#c9d1d9'>{s.session_id}</strong>&nbsp;"
+                f"<span style='color:#4a5568;font-size:0.82em'>"
+                f"{s.timestamp.strftime('%b %d, %Y')} · {tod[:9]}"
+                f" · sev:{s.severity or '?'} · {tags}</span>",
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.14)
+
+        status.update(
+            label=f"✅  {len(sessions)} sessions ingested · Temporal index ready",
+            state="complete",
+            expanded=False,
+        )
+        time.sleep(0.25)
+
+
+# ── Core streaming render ─────────────────────────────────────────────────────
+
+def _do_stream(chat: dict, is_initial: bool = False) -> tuple[str, str]:
+    """
+    Stream the next LLM response inside the **current** st.chat_message context.
+    Updates live placeholders for thinking and content.
+    Returns (full_content_text, full_thinking_text).
+    """
+    provider = _get_provider()
+
+    thinking_ph = st.empty()
+    content_ph  = st.empty()
+
+    thinking = ""
+    content  = ""
+
+    for chunk_type, chunk in stream_response(
+        chat["system"], chat["llm_messages"], provider
+    ):
+        if chunk_type == "thinking":
+            thinking += chunk
+            thinking_ph.markdown(
+                f"<details open><summary>💭 Clary is reasoning… "
+                f"({len(thinking.split())} words)</summary>"
+                f"<pre>{thinking[-700:]}</pre></details>",
+                unsafe_allow_html=True,
+            )
+        elif chunk_type == "content":
+            content += chunk
+            if is_initial:
+                content_ph.markdown(
+                    "<span style='color:#6e7681;font-style:italic'>"
+                    "⬛ Generating structured analysis…</span>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                content_ph.markdown(content + " ⬛")
+        elif chunk_type == "error":
+            content_ph.error(f"❌ Provider error: {chunk}")
+            return "", thinking
+
+    # Finalise
+    content_ph.empty()
+    if thinking:
+        thinking_ph.markdown(
+            f"<details><summary>💭 Reasoning trace "
+            f"({len(thinking.split())} words) — click to expand</summary>"
+            f"<pre>{thinking}</pre></details>",
+            unsafe_allow_html=True,
+        )
+    else:
+        thinking_ph.empty()
+
+    return content, thinking
+
+
+# ── Message history renderer (for chat replay) ────────────────────────────────
+
+def _display_past_message(msg: dict) -> None:
+    """Render a previously stored message (user or assistant)."""
+    role    = msg["role"]
+    content = msg["content"]
+    thinking = msg.get("thinking", "")
+    mtype   = msg.get("type", "chat")
+
+    if role == "user":
+        with st.chat_message("user"):
+            st.markdown(content)
         return
 
-    with st.expander("Temporal timeline sent to LLM", expanded=False):
-        st.code(build_temporal_timeline(user), language=None)
-
-    st.markdown("### Reasoning trace")
-    reasoning_box = st.empty()
-
-    st.markdown("### Detected patterns")
-    patterns_box = st.empty()
-
-    reasoning_text = ""
-    json_str = None
-
-    for event_type, content in stream_pattern_detection(user, provider):
-        if event_type == "reasoning":
-            reasoning_text += content
-            reasoning_box.markdown(
-                "<div style='font-size:0.82em;color:#555;font-family:monospace;"
-                f"white-space:pre-wrap;border-left:3px solid #ccc;padding-left:10px'>"
-                f"{reasoning_text}</div>",
+    with st.chat_message("assistant", avatar="🩺"):
+        if thinking:
+            st.markdown(
+                f"<details><summary>💭 Reasoning trace "
+                f"({len(thinking.split())} words) — click to expand</summary>"
+                f"<pre>{thinking}</pre></details>",
                 unsafe_allow_html=True,
             )
-        elif event_type == "reasoning_complete":
-            reasoning_box.markdown(
-                "<div style='font-size:0.82em;color:#555;font-family:monospace;"
-                f"white-space:pre-wrap;border-left:3px solid #ccc;padding-left:10px'>"
-                f"{content}</div>",
+        if mtype == "analysis":
+            json_str = _extract_json(content)
+            if json_str:
+                _render_patterns(json_str)
+            else:
+                st.markdown(content)
+        else:
+            st.markdown(content)
+
+
+# ── Follow-up handler ─────────────────────────────────────────────────────────
+
+def _handle_followup(chat: dict, user_input: str) -> None:
+    """Append a user turn, stream Clary's response, and persist both."""
+    # Display user bubble
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # Update state
+    chat["messages"].append({"role": "user", "content": user_input})
+    chat["llm_messages"].append({"role": "user", "content": user_input})
+
+    # Stream Clary's reply
+    with st.chat_message("assistant", avatar="🩺"):
+        content, thinking = _do_stream(chat, is_initial=False)
+
+    if content:
+        chat["messages"].append({
+            "role":     "assistant",
+            "content":  content,
+            "thinking": thinking,
+            "type":     "chat",
+        })
+        chat["llm_messages"].append({"role": "assistant", "content": content})
+
+    st.rerun()
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+def _render_sidebar(users: list[User]) -> None:
+    with st.sidebar:
+        st.markdown(
+            "<h2 style='color:#00b4d8;margin:0;font-size:1.4rem'>🩺 Clary</h2>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Ask First · Health Pattern Analyst")
+        st.divider()
+
+        st.markdown(
+            "<p style='font-size:0.8em;color:#8b949e;margin:0 0 8px'>SELECT PATIENT</p>",
+            unsafe_allow_html=True,
+        )
+
+        for u in users:
+            chat_state = st.session_state.chats.get(u.user_id, {})
+            is_done     = chat_state.get("done", False)
+            n_questions = len([m for m in chat_state.get("messages", []) if m["role"] == "user"])
+            is_selected = st.session_state.selected_uid == u.user_id
+
+            suffix = ""
+            if is_done and n_questions > 0:
+                suffix = f"  · {n_questions}Q"
+            elif is_done:
+                suffix = "  · ✓"
+
+            if st.button(
+                f"**{u.name}** ({u.user_id}){suffix}",
+                key=f"sel_{u.user_id}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary",
+            ):
+                if st.session_state.selected_uid != u.user_id:
+                    st.session_state.selected_uid = u.user_id
+                    st.rerun()
+
+        # ── Selected user profile ──────────────────────────────────────────
+        if st.session_state.selected_uid:
+            uid   = st.session_state.selected_uid
+            umap  = {u.user_id: u for u in users}
+            user  = umap[uid]
+            chat_state = st.session_state.chats.get(uid, {})
+
+            st.divider()
+            st.markdown(
+                f"<p style='font-size:0.8em;color:#8b949e;margin:0 0 4px'>PATIENT PROFILE</p>"
+                f"<strong style='color:#e6edf3'>{user.name}</strong>, {user.age}y · {user.gender}",
                 unsafe_allow_html=True,
             )
-        elif event_type == "complete":
-            json_str = content
-            with patterns_box.container():
-                render_patterns(json_str)
-        elif event_type == "error":
-            patterns_box.error(content)
+            st.caption(f"📍 {user.location}")
+            st.caption(f"💼 {user.occupation}")
+            st.caption(user.onboarding_notes)
 
-    if json_str:
-        with st.expander("Raw JSON output", expanded=False):
-            st.code(json_str, language="json")
+            sessions = sorted(user.sessions, key=lambda s: s.timestamp)
+            ref = compute_reference_date(sessions)
+
+            st.markdown(
+                f"<p style='font-size:0.8em;color:#8b949e;margin:8px 0 4px'>"
+                f"SESSION TIMELINE ({len(sessions)} sessions)</p>",
+                unsafe_allow_html=True,
+            )
+            for s in sessions:
+                w = get_week_number(s, ref)
+                d = get_day_delta(s, ref)
+                tags = ", ".join(s.tags[:2]) if s.tags else "—"
+                st.markdown(
+                    f"<div style='font-size:0.72em;color:#8b949e;line-height:1.7;"
+                    f"border-left:2px solid #1f2937;padding-left:8px;margin-bottom:2px'>"
+                    f"<span style='color:#005f73;font-family:monospace'>W{w:02d}/D{d:03d}</span>"
+                    f" · {s.timestamp.strftime('%b %d')}"
+                    f" · <code style='font-size:0.85em'>{s.session_id[-4:]}</code>"
+                    f" · {tags}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Reset button (only if analysis has been run)
+            if chat_state.get("done"):
+                st.divider()
+                if st.button("🔄 Reset Analysis", use_container_width=True):
+                    st.session_state.chats[uid] = {}
+                    st.rerun()
 
 
-def main() -> None:
-    st.title("Clary — Health Pattern Detector")
-    st.caption(
-        "Ask First · AI Intern Assignment · "
-        "Cross-session health pattern detection with temporal reasoning"
+# ── Welcome screen ────────────────────────────────────────────────────────────
+
+def _render_welcome(users: list[User]) -> None:
+    st.markdown(
+        "<div style='padding: 2rem 0 1rem 0; text-align: center;'><h1 style='font-size:3.5rem; margin-bottom:0;'><span style='font-size: 1.1em; vertical-align: text-bottom;'>🩺</span> <span class='gradient-text'>Clary</span></h1><p style='color:#94a3b8; font-size:1.2rem; margin-top:0.5rem; font-family:\"Outfit\", sans-serif; letter-spacing: 0.5px;'>Intelligent Health Pattern Analyst</p></div>",
+        unsafe_allow_html=True,
+    )
+    
+    st.markdown(
+        "<div style='background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 16px; padding: 2rem; margin: 1rem 0 2.5rem 0; backdrop-filter: blur(8px); text-align: center; font-size: 1.1em; color: #cbd5e1; line-height: 1.7;'><p style='margin-bottom: 1.5rem; color: #f8fafc; font-weight: 500;'>Please select a patient from the sidebar to begin analysis.</p><div style='display: flex; justify-content: space-around; flex-wrap: wrap; gap: 1rem; font-size: 0.9em; text-align: left;'><div style='flex: 1; min-width: 200px; background: rgba(0,0,0,0.2); padding: 1.2rem; border-radius: 12px;'><span style='font-size: 1.5em; display: block; margin-bottom: 0.5rem;'>⏱️</span><strong>Temporal Reasoning</strong><br><span style='color: #94a3b8;'>Analyzes events across weeks using precise day-deltas.</span></div><div style='flex: 1; min-width: 200px; background: rgba(0,0,0,0.2); padding: 1.2rem; border-radius: 12px;'><span style='font-size: 1.5em; display: block; margin-bottom: 0.5rem;'>🧠</span><strong>Causal Analysis</strong><br><span style='color: #94a3b8;'>Checks negative evidence and cascades, not just keywords.</span></div><div style='flex: 1; min-width: 200px; background: rgba(0,0,0,0.2); padding: 1.2rem; border-radius: 12px;'><span style='font-size: 1.5em; display: block; margin-bottom: 0.5rem;'>💬</span><strong>Persistent Context</strong><br><span style='color: #94a3b8;'>Ask follow-up questions using the full chronological history.</span></div></div></div>",
+        unsafe_allow_html=True,
     )
 
-    # API key warning
+    st.markdown(
+        "<p style='font-family:\"Outfit\", sans-serif; font-size:0.95em; color:#94a3b8; font-weight: 600; letter-spacing: 1px; margin-bottom: 1rem;'>PATIENT COHORT</p>",
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(len(users))
+    for col, u in zip(cols, users):
+        sessions = sorted(u.sessions, key=lambda s: s.timestamp)
+        with col:
+            st.markdown(
+                f"<div style='background:rgba(15,23,42,0.4);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:1.5rem;transition:transform 0.2s ease, box-shadow 0.2s ease;cursor:default;' onmouseover=\"this.style.transform='translateY(-4px)'; this.style.boxShadow='0 10px 25px rgba(0,0,0,0.2)';\" onmouseout=\"this.style.transform='translateY(0)'; this.style.boxShadow='none';\"><div style='display:flex;justify-content:space-between;align-items:flex-start;'><div><div style='color:#f8fafc;font-weight:600;font-size:1.2em;font-family:\"Outfit\",sans-serif;'>{u.name}</div><div style='color:#64748b;font-size:0.85em;margin-top:2px;'><code style='background:transparent;border:none;padding:0;'>{u.user_id}</code> · {u.age}y</div></div><div style='background:rgba(56,189,248,0.1);color:#38bdf8;border-radius:8px;padding:0.4rem 0.8rem;text-align:center;'><div style='font-size:1.2rem;font-weight:700;font-family:\"Outfit\",sans-serif;line-height:1;'>{len(sessions)}</div><div style='font-size:0.65em;font-weight:600;text-transform:uppercase;margin-top:2px;'>Sessions</div></div></div><div style='margin-top:1.2rem;padding-top:1.2rem;border-top:1px solid rgba(255,255,255,0.05);'><div style='color:#94a3b8;font-size:0.8em;margin-bottom:0.5rem;'><span style='color:#475569;'>Timeline:</span><br>{sessions[0].timestamp.strftime('%b %d')} – {sessions[-1].timestamp.strftime('%b %d, %Y')}</div><div style='color:#cbd5e1;font-size:0.85em;line-height:1.5;'>\"{u.onboarding_notes[:90]}…\"</div></div></div>",
+                unsafe_allow_html=True,
+            )
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    _init_state()
+
     if not os.getenv("LLM_API_KEY"):
         st.warning(
-            "No LLM_API_KEY found. Copy `.env.example` to `.env` and set your key.",
-            icon="",
+            "⚠️ No `LLM_API_KEY` found. Copy `.env.example` to `.env` and set your key.",
+            icon="🔑",
         )
 
     try:
-        users = get_dataset()
+        users = _load_users()
     except FileNotFoundError:
-        st.error(f"Dataset not found at: {DATASET_PATH}")
-        return
+        st.error(f"Dataset not found at: `{DATASET_PATH}`")
+        st.stop()
 
     user_map = {u.user_id: u for u in users}
 
-    st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    _render_sidebar(users)
 
-    selected_user = None
-    analyze_all = False
+    # ── Welcome screen ────────────────────────────────────────────────────────
+    if not st.session_state.selected_uid:
+        _render_welcome(users)
+        return
 
-    with col1:
-        if st.button("Analyze Arjun (USR001)", use_container_width=True):
-            selected_user = user_map.get("USR001")
-    with col2:
-        if st.button("Analyze Meera (USR002)", use_container_width=True):
-            selected_user = user_map.get("USR002")
-    with col3:
-        if st.button("Analyze Priya (USR003)", use_container_width=True):
-            selected_user = user_map.get("USR003")
-    with col4:
-        if st.button("Analyze All Users", use_container_width=True):
-            analyze_all = True
+    # ── User selected ─────────────────────────────────────────────────────────
+    uid  = st.session_state.selected_uid
+    user = user_map[uid]
+    chat = _get_chat(uid)
 
-    st.markdown("---")
+    # Header
+    st.markdown(
+        f"<h2 style='color:#e6edf3;margin-bottom:2px'>{user.name} "
+        f"<span style='color:#4a5568;font-size:0.6em;font-weight:400'>{user.user_id}</span></h2>"
+        f"<p style='color:#6e7681;margin:0;font-size:0.85em'>"
+        f"{user.occupation} · {user.location} · Age {user.age}</p>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
 
-    if analyze_all:
-        tabs = st.tabs([u.name for u in users])
-        for tab, user in zip(tabs, users):
-            with tab:
-                st.subheader(f"{user.name} ({user.user_id})")
-                st.caption(f"{user.occupation} · {user.location} · Age {user.age}")
-                run_analysis(user)
-    elif selected_user:
-        st.subheader(f"{selected_user.name} ({selected_user.user_id})")
-        st.caption(
-            f"{selected_user.occupation} · {selected_user.location} · Age {selected_user.age}"
-        )
-        run_analysis(selected_user)
-    else:
-        st.info(
-            "Select a user above to start pattern analysis. "
-            "The reasoning trace will stream live, followed by structured JSON pattern cards."
+    # ── Phase 1: Data ingestion + initial analysis ────────────────────────────
+    if not chat["done"]:
+        # Build and cache the system prompt (full timeline embedded)
+        chat["system"] = build_system_prompt(user)
+
+        # Animated session-by-session data ingestion
+        _animate_data_load(user)
+        st.divider()
+
+        # Clary header
+        st.markdown(
+            "<p style='color:#8b949e;font-size:0.85em;margin-bottom:4px'>"
+            "🧠&nbsp; INITIAL PATTERN ANALYSIS — streaming</p>",
+            unsafe_allow_html=True,
         )
 
-        st.markdown("#### Dataset overview")
-        for u in users:
-            with st.expander(f"{u.name} ({u.user_id}) — {len(u.sessions)} sessions"):
-                st.markdown(f"**Profile**: {u.onboarding_notes}")
-                sessions = sorted(u.sessions, key=lambda s: s.timestamp)
-                st.markdown(
-                    f"**Date range**: {sessions[0].timestamp.strftime('%b %d')} "
-                    f"– {sessions[-1].timestamp.strftime('%b %d, %Y')}"
+        # Build the first LLM turn
+        initial_msg = build_initial_user_message(user)
+        chat["llm_messages"] = [{"role": "user", "content": initial_msg}]
+
+        # Stream the initial analysis
+        with st.chat_message("assistant", avatar="🩺"):
+            content, thinking = _do_stream(chat, is_initial=True)
+
+        if content:
+            # Render pattern cards immediately below the chat bubble
+            json_str = _extract_json(content)
+            if json_str:
+                _render_patterns(json_str)
+            else:
+                st.markdown(content)
+                st.warning(
+                    "Pattern JSON not detected. The model may have responded in prose. "
+                    "You can still ask follow-up questions."
                 )
-                for s in sessions:
-                    st.markdown(
-                        f"- `{s.session_id}` {s.timestamp.strftime('%b %d')} "
-                        f"— {s.tags}"
-                    )
+
+            # Persist to state
+            chat["messages"].append({
+                "role":     "assistant",
+                "content":  content,
+                "thinking": thinking,
+                "type":     "analysis",
+            })
+            chat["llm_messages"].append({"role": "assistant", "content": content})
+            chat["done"] = True
+
+        st.divider()
+        st.success(
+            "✅ Analysis complete. Ask Clary any follow-up question about "
+            f"{user.name}'s patterns, sessions, or health history."
+        )
+
+        # Chat input available immediately — no rerun needed after initial analysis
+        prompt = st.chat_input(
+            f"Ask Clary about {user.name}'s health patterns…",
+            key=f"chat_input_{uid}_init",
+        )
+        if prompt:
+            _handle_followup(chat, prompt)
+
+    # ── Phase 2: Ongoing chat ─────────────────────────────────────────────────
+    else:
+        # Replay all stored messages
+        for msg in chat["messages"]:
+            _display_past_message(msg)
+
+        # Chat input for new questions
+        prompt = st.chat_input(
+            f"Ask Clary about {user.name}'s health patterns…",
+            key=f"chat_input_{uid}",
+        )
+        if prompt:
+            _handle_followup(chat, prompt)
 
 
 if __name__ == "__main__":
