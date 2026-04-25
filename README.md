@@ -2,6 +2,8 @@
 
 Ask First AI Intern Assignment. A conversational Streamlit app that reads a patient's full conversation history, ingests each session chronologically with temporal metadata, and surfaces hidden health patterns through streaming causal reasoning.
 
+Live app: https://askfirst-clary.streamlit.app/
+
 ---
 
 ## Setup
@@ -19,6 +21,8 @@ streamlit run app.py
 ```
 
 Open `http://localhost:8501`. Select a patient from the sidebar. Clary will ingest sessions one by one, run a full pattern analysis, and then let you chat about the findings.
+
+Hosted deployment: https://askfirst-clary.streamlit.app/
 
 ---
 

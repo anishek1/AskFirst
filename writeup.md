@@ -2,6 +2,8 @@
 
 This document addresses the mandatory submission requirements, detailing the reasoning approach, context strategy, honest failure analysis, and proposed future improvements.
 
+Live app: https://askfirst-clary.streamlit.app/
+
 ## 1. Approach to the Reasoning Problem
 
 ### No Hardcoded Patterns & Dynamic Generation
