@@ -33,8 +33,7 @@ pip install -r requirements.txt
 
 ## Architecture Decisions to Make
 
-**LLM choice**: Must be documented with rationale. Claude API (via `anthropic` SDK) is a strong default given the multi-step reasoning requirement and structured output needs.
-
+**LLM choice**: Must be documented with rationale. NVIDIA Nemotron-3-Nano-30B-A3B (via `openai` compatible SDK for NVIDIA NIM) is a strong default given the multi-step reasoning efficiency, MoE architecture, and structured output needs.
 **Context management strategy** (critical — graded equally with output quality):
 - The full conversation history per user fits in a single context window, but naive concatenation loses temporal signal.
 - Preferred approach: structured chronological summaries with explicit timestamps before each LLM reasoning call, not raw message dumps.

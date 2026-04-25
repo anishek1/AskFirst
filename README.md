@@ -103,14 +103,11 @@ src/
   data_loader.py           JSON → Session / User dataclasses (unchanged)
   temporal_engine.py       Pre-computes week numbers, day deltas, time-of-day
                            labels before any LLM call (unchanged)
-  chat_engine.py           [NEW] System prompt builder (embeds full temporal
+  chat_engine.py           System prompt builder (embeds full temporal
                            timeline), initial analysis prompt, stream_response()
   llm_provider.py          Abstract LLMProvider + Anthropic / OpenAI / Gemini /
-                           Ollama backends. All providers now implement both
-                           stream_text() (single-turn) and chat_stream()
+                           Ollama backends. All expose chat_stream()
                            (multi-turn with message history)
-  pattern_detector.py      Legacy streaming state machine (kept for reference)
-  prompts.py               Legacy prompt templates (kept for reference)
 
 Task/
   askfirst_synthetic_dataset.json   Read-only dataset (3 users, 27 sessions)
@@ -131,7 +128,7 @@ Each session is displayed with its pre-computed temporal label as it is "inserte
 `st.session_state.chats[user_id]` holds `system`, `messages` (display), `llm_messages` (LLM wire format), and `done` flag independently for each patient. Switching between Arjun, Meera, and Priya preserves each conversation independently.
 
 **Provider abstraction**
-All four providers implement `chat_stream(system, messages, max_tokens)`. `stream_text()` is now a thin wrapper that calls `chat_stream()` with a single-element messages list. This means the same provider code handles both the initial one-shot analysis and the ongoing multi-turn chat.
+All four providers implement `chat_stream(system, messages, max_tokens)`. The same provider code handles both the initial one-shot analysis and the ongoing multi-turn chat.
 
 ---
 

@@ -1,8 +1,7 @@
 """
 llm_provider.py — Abstract LLM provider with Anthropic / OpenAI / Gemini / Ollama backends.
 
-Each provider exposes two methods:
-  stream_text  — single-turn (convenience wrapper around chat_stream)
+Each provider exposes one method:
   chat_stream  — multi-turn, accepts message history list
 
 Yields: ("thinking", chunk) | ("content", chunk)
@@ -14,12 +13,6 @@ import os
 
 
 class LLMProvider(ABC):
-    @abstractmethod
-    def stream_text(
-        self, system: str, user: str, max_tokens: int
-    ) -> Generator[tuple[str, str], None, None]:
-        """Single-turn convenience wrapper. Yields ("thinking"|"content", chunk)."""
-
     @abstractmethod
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -37,13 +30,6 @@ class AnthropicProvider(LLMProvider):
         import anthropic
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
-
-    def stream_text(
-        self, system: str, user: str, max_tokens: int
-    ) -> Generator[tuple[str, str], None, None]:
-        yield from self.chat_stream(
-            system, [{"role": "user", "content": user}], max_tokens
-        )
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -73,13 +59,6 @@ class OpenAIProvider(LLMProvider):
         self._model = model
         self._thinking_enabled = thinking_enabled
         self._reasoning_budget = reasoning_budget
-
-    def stream_text(
-        self, system: str, user: str, max_tokens: int
-    ) -> Generator[tuple[str, str], None, None]:
-        yield from self.chat_stream(
-            system, [{"role": "user", "content": user}], max_tokens
-        )
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -119,13 +98,6 @@ class GeminiProvider(LLMProvider):
         genai.configure(api_key=api_key)
         self._model_name = model
 
-    def stream_text(
-        self, system: str, user: str, max_tokens: int
-    ) -> Generator[tuple[str, str], None, None]:
-        yield from self.chat_stream(
-            system, [{"role": "user", "content": user}], max_tokens
-        )
-
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
     ) -> Generator[tuple[str, str], None, None]:
@@ -154,13 +126,6 @@ class OllamaProvider(LLMProvider):
     def __init__(self, model: str, base_url: str = "http://localhost:11434"):
         self._model = model
         self._base_url = base_url.rstrip("/")
-
-    def stream_text(
-        self, system: str, user: str, max_tokens: int
-    ) -> Generator[tuple[str, str], None, None]:
-        yield from self.chat_stream(
-            system, [{"role": "user", "content": user}], max_tokens
-        )
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
