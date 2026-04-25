@@ -186,9 +186,9 @@ h1, h2, h3, h4, h5, h6 {
 [data-testid="stExpander"] summary:hover { color: #38bdf8; }
 
 /* ── High/Med/Low Confidence Accents ─────────────────────── */
-[data-testid="stExpander"]:has(p:contains("HIGH")) { border-left: 3px solid #10b981 !important; }
-[data-testid="stExpander"]:has(p:contains("MED")) { border-left: 3px solid #f59e0b !important; }
-[data-testid="stExpander"]:has(p:contains("LOW")) { border-left: 3px solid #ef4444 !important; }
+[data-testid="stExpander"]:has([data-confidence="high"]) { border-left: 3px solid #10b981 !important; }
+[data-testid="stExpander"]:has([data-confidence="medium"]) { border-left: 3px solid #f59e0b !important; }
+[data-testid="stExpander"]:has([data-confidence="low"]) { border-left: 3px solid #ef4444 !important; }
 
 /* ── Code & Inline Code ──────────────────────────────────── */
 code {
@@ -293,7 +293,7 @@ def _init_state() -> None:
 
 def _get_chat(uid: str) -> dict:
     """Return (creating if necessary) the chat state dict for a user."""
-    if uid not in st.session_state.chats:
+    if uid not in st.session_state.chats or not st.session_state.chats[uid]:
         st.session_state.chats[uid] = {
             "system":       "",    # full system prompt with timeline
             "messages":     [],    # display dicts: {role, content, thinking, type}
@@ -372,6 +372,10 @@ def _render_patterns(json_str: str) -> None:
         title  = p.get("title", "Untitled pattern")
 
         with st.expander(f"{icon} **{pid}** · {title}  `{badge}`", expanded=True):
+            st.markdown(
+                f"<span data-confidence='{conf}' style='display:none'></span>",
+                unsafe_allow_html=True,
+            )
             left, right = st.columns([3, 2])
 
             with left:
@@ -752,7 +756,7 @@ def main() -> None:
         # Chat input available immediately — no rerun needed after initial analysis
         prompt = st.chat_input(
             f"Ask Clary about {user.name}'s health patterns…",
-            key=f"chat_input_{uid}_init",
+            key=f"chat_input_{uid}",
         )
         if prompt:
             _handle_followup(chat, prompt)

@@ -30,10 +30,10 @@ Hosted deployment: https://askfirst-clary.streamlit.app/
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `gemini`, `ollama` |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Model name within the chosen provider |
+| `LLM_PROVIDER` | `openai` | `openai`, `anthropic`, `gemini`, `ollama` |
+| `LLM_MODEL` | `nvidia/nemotron-3-nano-30b-a3b` | Model name within the chosen provider |
 | `LLM_API_KEY` | — | API key for the provider |
-| `LLM_BASE_URL` | — | Optional; for OpenAI-compatible endpoints (NVIDIA NIM, etc.) |
+| `LLM_BASE_URL` | `https://integrate.api.nvidia.com/v1` for NVIDIA models | Optional; for OpenAI-compatible endpoints (NVIDIA NIM, etc.) |
 | `LLM_MAX_TOKENS` | `16384` | Max output tokens per reasoning call |
 | `LLM_THINKING_ENABLED` | `false` | Enable extended thinking (OpenAI-compatible providers with reasoning_content) |
 | `LLM_REASONING_BUDGET` | `16384` | Token budget for reasoning traces (when thinking is enabled) |

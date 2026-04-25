@@ -157,7 +157,7 @@ class OllamaProvider(LLMProvider):
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 def get_provider() -> LLMProvider:
-    provider_name = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    provider_name = os.getenv("LLM_PROVIDER", "openai").lower()
     api_key = os.getenv("LLM_API_KEY", "")
     model = os.getenv("LLM_MODEL", "")
     base_url = os.getenv("LLM_BASE_URL") or None
@@ -167,9 +167,12 @@ def get_provider() -> LLMProvider:
     if provider_name == "anthropic":
         return AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-6")
     elif provider_name == "openai":
+        model = model or "nvidia/nemotron-3-nano-30b-a3b"
+        if base_url is None and model.startswith("nvidia/"):
+            base_url = "https://integrate.api.nvidia.com/v1"
         return OpenAIProvider(
             api_key=api_key,
-            model=model or "gpt-4o",
+            model=model,
             base_url=base_url,
             thinking_enabled=thinking,
             reasoning_budget=reasoning_budget,
