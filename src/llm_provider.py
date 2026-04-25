@@ -26,10 +26,11 @@ class LLMProvider(ABC):
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 class AnthropicProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, temperature: float = 0.0):
         import anthropic
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
+        self._temperature = temperature
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -39,6 +40,7 @@ class AnthropicProvider(LLMProvider):
             max_tokens=max_tokens,
             system=system,
             messages=messages,
+            temperature=self._temperature,
         ) as stream:
             for text in stream.text_stream:
                 yield ("content", text)
@@ -53,12 +55,18 @@ class OpenAIProvider(LLMProvider):
         base_url: str | None = None,
         thinking_enabled: bool = False,
         reasoning_budget: int = 16384,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int | None = None,
     ):
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._thinking_enabled = thinking_enabled
         self._reasoning_budget = reasoning_budget
+        self._temperature = temperature
+        self._top_p = top_p
+        self._seed = seed
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -69,9 +77,11 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
             messages=openai_messages,
             stream=True,
-            temperature=1,
-            top_p=1,
+            temperature=self._temperature,
+            top_p=self._top_p,
         )
+        if self._seed is not None:
+            kwargs["seed"] = self._seed
         if self._thinking_enabled:
             kwargs["extra_body"] = {
                 "reasoning_budget": self._reasoning_budget,
@@ -93,10 +103,12 @@ class OpenAIProvider(LLMProvider):
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 class GeminiProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, temperature: float = 0.0, top_p: float = 1.0):
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         self._model_name = model
+        self._temperature = temperature
+        self._top_p = top_p
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -106,7 +118,11 @@ class GeminiProvider(LLMProvider):
         model = genai.GenerativeModel(
             model_name=self._model_name,
             system_instruction=system,
-            generation_config={"max_output_tokens": max_tokens},
+            generation_config={
+                "max_output_tokens": max_tokens,
+                "temperature": self._temperature,
+                "top_p": self._top_p,
+            },
         )
         # Convert to Gemini's history format (all messages except the last)
         history = []
@@ -123,9 +139,17 @@ class GeminiProvider(LLMProvider):
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
 class OllamaProvider(LLMProvider):
-    def __init__(self, model: str, base_url: str = "http://localhost:11434"):
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://localhost:11434",
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+    ):
         self._model = model
         self._base_url = base_url.rstrip("/")
+        self._temperature = temperature
+        self._top_p = top_p
 
     def chat_stream(
         self, system: str, messages: list[dict], max_tokens: int
@@ -138,7 +162,11 @@ class OllamaProvider(LLMProvider):
             "model": self._model,
             "messages": all_messages,
             "stream": True,
-            "options": {"num_predict": max_tokens},
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": self._temperature,
+                "top_p": self._top_p,
+            },
         }).encode()
         req = urllib.request.Request(
             f"{self._base_url}/api/chat",
@@ -163,9 +191,17 @@ def get_provider() -> LLMProvider:
     base_url = os.getenv("LLM_BASE_URL") or None
     thinking = os.getenv("LLM_THINKING_ENABLED", "false").lower() == "true"
     reasoning_budget = int(os.getenv("LLM_REASONING_BUDGET", "16384"))
+    temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
+    top_p = float(os.getenv("LLM_TOP_P", "1"))
+    seed_env = os.getenv("LLM_SEED", "").strip()
+    seed = int(seed_env) if seed_env else None
 
     if provider_name == "anthropic":
-        return AnthropicProvider(api_key=api_key, model=model or "claude-sonnet-4-6")
+        return AnthropicProvider(
+            api_key=api_key,
+            model=model or "claude-sonnet-4-6",
+            temperature=temperature,
+        )
     elif provider_name == "openai":
         model = model or "nvidia/nemotron-3-nano-30b-a3b"
         if base_url is None and model.startswith("nvidia/"):
@@ -176,13 +212,23 @@ def get_provider() -> LLMProvider:
             base_url=base_url,
             thinking_enabled=thinking,
             reasoning_budget=reasoning_budget,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
         )
     elif provider_name == "gemini":
-        return GeminiProvider(api_key=api_key, model=model or "gemini-1.5-pro")
+        return GeminiProvider(
+            api_key=api_key,
+            model=model or "gemini-1.5-pro",
+            temperature=temperature,
+            top_p=top_p,
+        )
     elif provider_name == "ollama":
         return OllamaProvider(
             model=model or "llama3",
             base_url=base_url or "http://localhost:11434",
+            temperature=temperature,
+            top_p=top_p,
         )
     else:
         raise ValueError(

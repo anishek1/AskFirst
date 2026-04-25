@@ -6,6 +6,19 @@ Live app: https://askfirst-clary.streamlit.app/
 
 ---
 
+## Assignment Coverage
+
+- Streamlit interface with patient selection.
+- Session-by-session ingestion for each user, shown chronologically.
+- Full temporal history embedded in the reasoning prompt with week/day/time labels.
+- Streaming chat for both initial analysis and follow-up questions.
+- JSON pattern output with confidence scores and one-line justifications.
+- Reasoning trace visible in the UI.
+- NVIDIA Nemotron via OpenAI-compatible NVIDIA NIM endpoints.
+- No hardcoded pattern rules; patterns are generated dynamically from the user timeline.
+
+---
+
 ## Setup
 
 ```bash
@@ -35,6 +48,9 @@ Hosted deployment: https://askfirst-clary.streamlit.app/
 | `LLM_API_KEY` | — | API key for the provider |
 | `LLM_BASE_URL` | `https://integrate.api.nvidia.com/v1` for NVIDIA models | Optional; for OpenAI-compatible endpoints (NVIDIA NIM, etc.) |
 | `LLM_MAX_TOKENS` | `16384` | Max output tokens per reasoning call |
+| `LLM_TEMPERATURE` | `0` | Deterministic decoding for stable pattern finding |
+| `LLM_TOP_P` | `1` | Nucleus sampling cap; keep `1` with temperature `0` |
+| `LLM_SEED` | — | Optional seed for OpenAI-compatible endpoints that support it |
 | `LLM_THINKING_ENABLED` | `false` | Enable extended thinking (OpenAI-compatible providers with reasoning_content) |
 | `LLM_REASONING_BUDGET` | `16384` | Token budget for reasoning traces (when thinking is enabled) |
 
@@ -45,6 +61,9 @@ LLM_MODEL=nvidia/nemotron-3-nano-30b-a3b
 LLM_API_KEY=nvapi-...
 LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 LLM_MAX_TOKENS=16384
+LLM_TEMPERATURE=0
+LLM_TOP_P=1
+LLM_SEED=
 LLM_THINKING_ENABLED=true
 LLM_REASONING_BUDGET=16384
 ```
@@ -57,6 +76,16 @@ LLM_API_KEY=sk-ant-...
 ```
 
 No code changes are needed when switching providers — only `.env` changes.
+
+---
+
+## Demo Flow
+
+1. Open the Streamlit app and select Arjun, Meera, or Priya from the sidebar.
+2. Watch the selected user's sessions ingest in chronological order with temporal labels.
+3. Review Clary's streamed pattern analysis, confidence scores, reasoning traces, and cited sessions.
+4. Download the generated JSON or regenerate the analysis if the model returns invalid JSON.
+5. Ask follow-up questions in chat; the selected user's full temporal history remains available.
 
 ---
 

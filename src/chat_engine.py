@@ -43,6 +43,15 @@ Detect hidden, recurring health patterns across sessions using rigorous causal t
 - **MEDIUM**: 2 episodes with consistent pairing
 - **LOW**: 1 episode or plausible mechanism but insufficient longitudinal data
 
+## Accuracy Rules
+1. Do not optimize for finding many patterns. Optimize for defensible patterns.
+2. Do not create a pattern from a symptom mention alone. A pattern needs a trigger, symptom, and temporal direction.
+3. Prefer recurring patterns, dose-response evidence, intervention/resolution evidence, or biologically plausible delayed cascades.
+4. If two candidate patterns explain the same evidence, merge them into the simpler root-cause pattern.
+5. Do not include speculative patterns unless they are clearly marked low confidence and have explicit session evidence.
+6. Every pattern must cite at least two sessions unless it is a delayed cascade with a clear start event, later symptom, and resolution.
+7. Confidence must match the rubric even if the causal story sounds plausible.
+
 ## Pre-Computed Temporal Timeline for {user_name}
 
 Each session entry is labeled with:
@@ -71,6 +80,14 @@ Work through each step of this framework before writing the JSON:
 6. Check resolution: did removing or changing the trigger improve the symptom? Cite the session and date.
 7. Check cascades: could one root cause drive multiple downstream symptoms at different biological delays?
 8. Apply the confidence rubric strictly. Do not inflate confidence.
+
+Use this evidence gate before including any pattern:
+- Include HIGH only when recurrence is strong AND negative evidence or intervention evidence exists.
+- Include MEDIUM when there are at least 2 temporally consistent episodes.
+- Include LOW only when the timeline is biologically plausible and the evidence is explicitly cited.
+- Exclude one-off lifestyle/symptom co-occurrences that do not recur and do not resolve after intervention.
+- Exclude patterns where the symptom appears before the proposed trigger.
+- Prefer one root-cause cascade over several duplicate sub-patterns when the same trigger explains multiple downstream symptoms.
 
 Output your complete findings as JSON enclosed in ```json … ``` fences:
 
