@@ -27,7 +27,7 @@ from src.temporal_engine import (
     build_temporal_timeline,
 )
 
-DATASET_PATH = Path(__file__).parent / "Task" / "askfirst_synthetic_dataset.json"
+DATASET_PATH = Path(__file__).parent / "dataset" / "askfirst_synthetic_dataset.json"
 CACHE_DIR    = Path(__file__).parent / ".clary_cache"
 
 # ── Page config ───────────────────────────────────────────────────────────────
