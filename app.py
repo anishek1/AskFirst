@@ -10,8 +10,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-for _k, _v in st.secrets.items():
-    os.environ.setdefault(_k, str(_v))
+try:
+    for _k, _v in st.secrets.items():
+        os.environ.setdefault(_k, str(_v))
+except Exception:
+    pass
 
 from src.data_loader import load_dataset, User
 from src.llm_provider import get_provider
