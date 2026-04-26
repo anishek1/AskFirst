@@ -22,7 +22,12 @@ for _k in _SECRET_KEYS:
         _secrets_loaded.append(_k)
 
 _api_key = os.environ.get("LLM_API_KEY", "")
-_DEBUG_INFO = f"Secrets loaded: {_secrets_loaded} | Key length: {len(_api_key)} | Key prefix: {_api_key[:8]}"
+_DEBUG_INFO = (
+    f"Provider: {os.environ.get('LLM_PROVIDER','?')} | "
+    f"Model: {os.environ.get('LLM_MODEL','?')} | "
+    f"Base URL: {os.environ.get('LLM_BASE_URL','?')} | "
+    f"Key prefix: {_api_key[:8]} | Key length: {len(_api_key)}"
+)
 
 from src.data_loader import load_dataset, User
 from src.llm_provider import get_provider
