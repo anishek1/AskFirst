@@ -1,17 +1,23 @@
 """
 app.py — Clary: Health Pattern Analyst (Conversational Streamlit App)
 
-UX flow per user:
-  1. User selects a patient from the sidebar.
-  2. Each session is inserted chronologically with pre-computed temporal labels (animated).
-  3. Clary performs an initial full pattern analysis (streamed with live reasoning trace).
-  4. The user can ask unlimited follow-up questions; the full conversation history is
-     maintained per patient and sent to the LLM on every turn.
+Two analysis modes:
+  • Single patient  — select Arjun, Meera, or Priya from the sidebar.
+  • All Patients    — cross-patient population analysis via the 🔬 button.
+
+Both modes support:
+  • File-based analysis cache (survives page reload, keyed by session hash).
+  • Streaming LLM response with live reasoning trace.
+  • Plotly pattern timeline visualisation.
+  • JSON and HTML report export.
+  • Unlimited multi-turn follow-up chat; full history preserved per patient.
 """
 
+import hashlib
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -24,6 +30,8 @@ from src.llm_provider import get_provider
 from src.chat_engine import (
     build_system_prompt,
     build_initial_user_message,
+    build_all_patients_system_prompt,
+    build_cross_patient_user_message,
     stream_response,
 )
 from src.temporal_engine import (
@@ -35,6 +43,7 @@ from src.temporal_engine import (
 )
 
 DATASET_PATH = Path(__file__).parent / "Task" / "askfirst_synthetic_dataset.json"
+CACHE_DIR    = Path(__file__).parent / ".clary_cache"
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -283,6 +292,49 @@ hr {
     unsafe_allow_html=True,
 )
 
+# ── Analysis cache helpers ────────────────────────────────────────────────────
+
+def _compute_user_hash(user: User) -> str:
+    key = "|".join(
+        f"{s.session_id}:{s.timestamp.isoformat()}"
+        for s in sorted(user.sessions, key=lambda x: x.timestamp)
+    )
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+def _compute_all_hash(users: list) -> str:
+    key = "||".join(
+        "|".join(
+            f"{s.session_id}:{s.timestamp.isoformat()}"
+            for s in sorted(u.sessions, key=lambda x: x.timestamp)
+        )
+        for u in sorted(users, key=lambda u: u.user_id)
+    )
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+def _cache_path(uid: str, cache_hash: str) -> Path:
+    return CACHE_DIR / f"{uid}_{cache_hash}.json"
+
+
+def _load_analysis_cache(uid: str, cache_hash: str) -> dict | None:
+    path = _cache_path(uid, cache_hash)
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def _save_analysis_cache(uid: str, cache_hash: str, content: str, thinking: str) -> None:
+    CACHE_DIR.mkdir(exist_ok=True)
+    _cache_path(uid, cache_hash).write_text(
+        json.dumps({"content": content, "thinking": thinking}),
+        encoding="utf-8",
+    )
+
+
 # ── Session-state helpers ─────────────────────────────────────────────────────
 
 def _init_state() -> None:
@@ -443,7 +495,399 @@ def _render_patterns(json_str: str, user: User | None = None) -> bool:
                 for i, step in enumerate(p.get("trace", []), 1):
                     st.caption(f"{i}. {step}")
 
+    # Pattern timeline visualisation
+    if patterns and user is not None:
+        with st.expander("📅 Pattern Timeline", expanded=True):
+            _render_pattern_timeline(data, user, sessions)
+
     return True
+
+
+# ── Plotly pattern timeline ───────────────────────────────────────────────────
+
+def _render_pattern_timeline(patterns_data: dict, user: User, session_lookup: dict) -> None:
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.caption("Install plotly (`pip install plotly`) to enable the pattern timeline.")
+        return
+
+    patterns = patterns_data.get("patterns", [])
+    if not patterns:
+        return
+
+    conf_colors = {"high": "#10b981", "medium": "#f59e0b", "low": "#ef4444"}
+    rows, x_vals, hovers, colors = [], [], [], []
+
+    for p in patterns:
+        conf  = p.get("confidence", "low").lower()
+        color = conf_colors.get(conf, "#94a3b8")
+        label = f"{p.get('pattern_id', '?')}: {p.get('title', '')[:48]}"
+        for sid in p.get("sessions_involved", []):
+            sess = session_lookup.get(sid)
+            if sess:
+                rows.append(label)
+                x_vals.append(sess.timestamp)
+                hovers.append(
+                    f"<b>{sess.session_id}</b><br>"
+                    f"{sess.timestamp.strftime('%b %d, %Y %H:%M')}<br>"
+                    f"Severity: {sess.severity or '?'}<br>"
+                    f"Tags: {', '.join(sess.tags[:3]) or '—'}"
+                )
+                colors.append(color)
+
+    if not x_vals:
+        st.caption("No session dates found for timeline.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x_vals, y=rows, mode="markers",
+        marker=dict(size=14, color=colors, symbol="circle",
+                    line=dict(width=1, color="rgba(255,255,255,0.2)")),
+        hovertext=hovers, hoverinfo="text", showlegend=False,
+    ))
+    for conf, color in conf_colors.items():
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=conf.capitalize(),
+            marker=dict(size=10, color=color), showlegend=True,
+        ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,23,42,0.4)",
+        font=dict(color="#e2e8f0", family="Inter, sans-serif", size=12),
+        xaxis=dict(title="", gridcolor="rgba(255,255,255,0.05)", tickformat="%b %d",
+                   tickfont=dict(size=11, color="#64748b"), zeroline=False),
+        yaxis=dict(title="", gridcolor="rgba(255,255,255,0.04)",
+                   tickfont=dict(size=10), autorange="reversed"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=10, r=10, t=40, b=30),
+        height=max(180, len(set(rows)) * 55 + 100),
+        hoverlabel=dict(bgcolor="rgba(15,23,42,0.95)",
+                        bordercolor="rgba(255,255,255,0.1)",
+                        font=dict(color="#e2e8f0")),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ── HTML report generator ─────────────────────────────────────────────────────
+
+_SHARED_REPORT_CSS = (
+    "*{margin:0;padding:0;box-sizing:border-box}"
+    "body{background:#020617;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6}"
+    ".container{max-width:900px;margin:0 auto;padding:2rem 1.5rem 4rem}"
+    "header{border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:1.5rem;margin-bottom:2rem}"
+    ".logo{font-size:1rem;color:#38bdf8;font-weight:700;letter-spacing:.06em;margin-bottom:.4rem}"
+    ".pname{font-size:1.7rem;font-weight:600;color:#f8fafc}"
+    ".pmeta{color:#64748b;font-size:.82rem;margin-top:.3rem}"
+    ".pnotes{color:#94a3b8;font-size:.8rem;margin-top:.5rem;font-style:italic}"
+    ".summary{display:flex;gap:1rem;background:rgba(15,23,42,.5);border:1px solid rgba(255,255,255,.06);"
+    "border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:2rem}"
+    ".metric{flex:1;text-align:center}"
+    ".mv{display:block;font-size:1.8rem;font-weight:700}"
+    ".ml{display:block;font-size:.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-top:.1rem}"
+    ".card{background:rgba(15,23,42,.4);border:1px solid rgba(255,255,255,.07);"
+    "border-radius:14px;padding:1.4rem;margin-bottom:1.2rem;page-break-inside:avoid}"
+    ".card-header{display:flex;align-items:baseline;gap:.7rem;margin-bottom:.9rem}"
+    ".pid{font-size:.68rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.1em}"
+    ".ptitle{font-size:1rem;font-weight:600;color:#f8fafc;flex:1}"
+    ".conf{font-size:.76rem;font-weight:700}"
+    ".two-col{display:grid;grid-template-columns:3fr 2fr;gap:1.5rem}"
+    ".lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;"
+    "font-weight:600;margin-bottom:.25rem;margin-top:.75rem}"
+    ".body{color:#cbd5e1;font-size:.85rem;line-height:1.55}"
+    ".cbox{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);"
+    "border-radius:8px;padding:.55rem .8rem}"
+    ".badges{display:flex;flex-wrap:wrap;gap:.3rem;margin-bottom:.2rem}"
+    ".badge{background:rgba(30,41,59,.7);border:1px solid rgba(255,255,255,.08);border-radius:6px;"
+    "padding:.12rem .5rem;font-size:.73rem;font-family:monospace;color:#7dd3fc}"
+    ".trace{list-style:decimal;padding-left:1.1rem;color:#64748b;font-size:.79rem}"
+    ".trace li{padding:.18rem 0}"
+    "footer{margin-top:3rem;padding-top:1rem;border-top:1px solid rgba(255,255,255,.06);"
+    "text-align:center;color:#334155;font-size:.74rem}"
+    "@media print{body{background:#fff;color:#111}}"
+)
+
+
+def _generate_html_report(patterns_data: dict, user: User, session_lookup: dict) -> str:
+    patterns    = patterns_data.get("patterns", [])
+    conf_colors = {"high": "#10b981", "medium": "#f59e0b", "low": "#ef4444"}
+    conf_icons  = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+
+    cards_html = ""
+    for p in patterns:
+        conf  = p.get("confidence", "low").lower()
+        color = conf_colors.get(conf, "#94a3b8")
+        icon  = conf_icons.get(conf, "⚪")
+
+        sessions_html = "".join(
+            f'<span class="badge">{session_lookup[sid].session_id} · '
+            f'{session_lookup[sid].timestamp.strftime("%b %d")}</span>'
+            if sid in session_lookup else f'<span class="badge">{sid}</span>'
+            for sid in p.get("sessions_involved", [])
+        )
+        trace_html = "".join(f"<li>{s}</li>" for s in p.get("trace", []))
+
+        cards_html += (
+            f'<div class="card" style="border-left:3px solid {color}">'
+            f'<div class="card-header">'
+            f'<span class="pid">{p.get("pattern_id","?")}</span>'
+            f'<span class="ptitle">{p.get("title","")}</span>'
+            f'<span class="conf" style="color:{color}">{icon} {conf.upper()}</span>'
+            f'</div>'
+            f'<div class="two-col">'
+            f'<div><p class="lbl">Temporal Reasoning</p>'
+            f'<p class="body">{p.get("temporal_reasoning","—")}</p>'
+            f'<p class="lbl">Confidence Justification</p>'
+            f'<p class="body cbox">{p.get("confidence_justification","—")}</p></div>'
+            f'<div><p class="lbl">Sessions Involved</p>'
+            f'<div class="badges">{sessions_html}</div>'
+            f'<p class="lbl" style="margin-top:1rem">Reasoning Trace</p>'
+            f'<ol class="trace">{trace_html}</ol></div>'
+            f'</div></div>'
+        )
+
+    n_high = sum(1 for p in patterns if p.get("confidence","").lower() == "high")
+    n_med  = sum(1 for p in patterns if p.get("confidence","").lower() == "medium")
+    n_low  = sum(1 for p in patterns if p.get("confidence","").lower() == "low")
+
+    return (
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+        f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>Clary · {user.name} Report</title>'
+        f'<style>{_SHARED_REPORT_CSS}</style></head><body>'
+        f'<div class="container">'
+        f'<header>'
+        f'<div class="logo">🩺 CLARY · HEALTH PATTERN REPORT</div>'
+        f'<div class="pname">{user.name}</div>'
+        f'<div class="pmeta">{user.user_id} · {user.age}y · {user.gender}'
+        f' · {user.occupation} · {user.location}</div>'
+        f'<div class="pnotes">{user.onboarding_notes}</div>'
+        f'</header>'
+        f'<div class="summary">'
+        f'<div class="metric"><span class="mv">{len(patterns)}</span><span class="ml">Patterns</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#10b981">{n_high}</span><span class="ml">High</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#f59e0b">{n_med}</span><span class="ml">Medium</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#ef4444">{n_low}</span><span class="ml">Low</span></div>'
+        f'</div>'
+        f'{cards_html}'
+        f'<footer>Generated by Clary · Ask First · {datetime.now().strftime("%Y-%m-%d %H:%M")}</footer>'
+        f'</div></body></html>'
+    )
+
+
+# ── Cross-patient renderers ───────────────────────────────────────────────────
+
+_USER_COLORS = {"USR001": "#38bdf8", "USR002": "#a78bfa", "USR003": "#34d399"}
+
+
+def _render_cross_patient_patterns(json_str: str, users: list[User]) -> bool:
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as exc:
+        st.error(f"Invalid JSON from model: {exc.msg}")
+        st.code(json_str, language="json")
+        return False
+
+    if not isinstance(data, dict) or "cross_patient_patterns" not in data:
+        st.error("Expected `cross_patient_patterns` key in model output.")
+        st.code(json_str, language="json")
+        return False
+
+    patterns = data.get("cross_patient_patterns", [])
+    if not patterns:
+        st.warning("No cross-patient patterns detected.")
+        return False
+
+    combined_lookup: dict = {}
+    for u in users:
+        combined_lookup.update(_session_lookup(u))
+
+    conf_counts: dict = {}
+    for p in patterns:
+        c = p.get("confidence", "low").lower()
+        conf_counts[c] = conf_counts.get(c, 0) + 1
+
+    cols = st.columns(4)
+    cols[0].metric("Cross-patient patterns", len(patterns))
+    cols[1].metric("🟢 High",   conf_counts.get("high",   0))
+    cols[2].metric("🟡 Medium", conf_counts.get("medium", 0))
+    cols[3].metric("🔴 Low",    conf_counts.get("low",    0))
+    st.markdown("")
+
+    for p in patterns:
+        conf  = p.get("confidence", "low").lower()
+        icon  = _CONF_ICON.get(conf, "⚪")
+        badge = _CONF_BADGE.get(conf, conf.upper())
+        pid   = p.get("pattern_id", "?")
+        title = p.get("title", "Untitled")
+
+        with st.expander(f"{icon} **{pid}** · {title}  `{badge}`", expanded=True):
+            st.markdown(
+                f"<span data-confidence='{conf}' style='display:none'></span>",
+                unsafe_allow_html=True,
+            )
+            _affected_parts = []
+            for _ua in p.get("users_affected", []):
+                _uc = _USER_COLORS.get(_ua.split()[0], "#94a3b8")
+                _affected_parts.append(
+                    f"<span style='background:rgba(30,41,59,.6);border:1px solid rgba(255,255,255,.1);"
+                    f"border-radius:6px;padding:.15rem .6rem;font-size:.8rem;color:{_uc}'>{_ua}</span>"
+                )
+            affected_html = " ".join(_affected_parts)
+            st.markdown(
+                f"<div style='margin-bottom:.8rem'>👥 <strong>Patients:</strong> {affected_html}</div>",
+                unsafe_allow_html=True,
+            )
+            left, right = st.columns([3, 2])
+            with left:
+                st.markdown("**📅 Temporal Reasoning**")
+                st.markdown(p.get("temporal_reasoning", "—"))
+                st.markdown("**🔍 Confidence Justification**")
+                st.info(p.get("confidence_justification", "—"))
+            with right:
+                st.markdown("**📋 Sessions Involved**")
+                for sid in p.get("sessions_involved", []):
+                    _render_session_citation(sid, combined_lookup)
+                st.markdown("**🧠 Reasoning Trace**")
+                for i, step in enumerate(p.get("trace", []), 1):
+                    st.caption(f"{i}. {step}")
+
+    with st.expander("📅 Cross-Patient Pattern Timeline", expanded=True):
+        _render_cross_patient_timeline(data, users, combined_lookup)
+
+    return True
+
+
+def _render_cross_patient_timeline(
+    patterns_data: dict, users: list[User], session_lookup: dict
+) -> None:
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.caption("Install plotly to enable the timeline.")
+        return
+
+    patterns      = patterns_data.get("cross_patient_patterns", [])
+    user_name_map = {u.user_id: u.name for u in users}
+
+    fig = go.Figure()
+    for uid, color in _USER_COLORS.items():
+        name = user_name_map.get(uid, uid)
+        x_vals, y_vals, hovers = [], [], []
+        for p in patterns:
+            label = f"{p.get('pattern_id','?')}: {p.get('title','')[:40]}"
+            for sid in p.get("sessions_involved", []):
+                if not sid.startswith(uid):
+                    continue
+                sess = session_lookup.get(sid)
+                if sess:
+                    x_vals.append(sess.timestamp)
+                    y_vals.append(label)
+                    hovers.append(
+                        f"<b>{name}</b> · {sess.session_id}<br>"
+                        f"{sess.timestamp.strftime('%b %d, %Y')}<br>"
+                        f"Tags: {', '.join(sess.tags[:3]) or '—'}"
+                    )
+        if x_vals:
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="markers", name=name,
+                marker=dict(size=14, color=color, symbol="circle",
+                            line=dict(width=1, color="rgba(255,255,255,.2)")),
+                hovertext=hovers, hoverinfo="text",
+            ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,23,42,0.4)",
+        font=dict(color="#e2e8f0", family="Inter, sans-serif", size=12),
+        xaxis=dict(title="", gridcolor="rgba(255,255,255,0.05)", tickformat="%b %d",
+                   tickfont=dict(size=11, color="#64748b"), zeroline=False),
+        yaxis=dict(title="", gridcolor="rgba(255,255,255,0.04)",
+                   tickfont=dict(size=10), autorange="reversed"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=10, r=10, t=40, b=30),
+        height=max(180, len(patterns) * 60 + 100),
+        hoverlabel=dict(bgcolor="rgba(15,23,42,.95)",
+                        bordercolor="rgba(255,255,255,.1)",
+                        font=dict(color="#e2e8f0")),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _generate_cp_html_report(patterns_data: dict, users: list[User]) -> str:
+    patterns    = patterns_data.get("cross_patient_patterns", [])
+    conf_colors = {"high": "#10b981", "medium": "#f59e0b", "low": "#ef4444"}
+    conf_icons  = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+
+    combined_lookup: dict = {}
+    for u in users:
+        combined_lookup.update(_session_lookup(u))
+
+    cards_html = ""
+    for p in patterns:
+        conf     = p.get("confidence", "low").lower()
+        color    = conf_colors.get(conf, "#94a3b8")
+        icon     = conf_icons.get(conf, "⚪")
+        affected = " · ".join(p.get("users_affected", []))
+
+        sessions_html = "".join(
+            f'<span class="badge">{combined_lookup[sid].session_id} · '
+            f'{combined_lookup[sid].timestamp.strftime("%b %d")}</span>'
+            if sid in combined_lookup else f'<span class="badge">{sid}</span>'
+            for sid in p.get("sessions_involved", [])
+        )
+        trace_html = "".join(f"<li>{s}</li>" for s in p.get("trace", []))
+
+        cards_html += (
+            f'<div class="card" style="border-left:3px solid {color}">'
+            f'<div class="card-header">'
+            f'<span class="pid">{p.get("pattern_id","?")}</span>'
+            f'<span class="ptitle">{p.get("title","")}</span>'
+            f'<span class="conf" style="color:{color}">{icon} {conf.upper()}</span>'
+            f'</div>'
+            f'<p class="lbl">Patients Affected</p>'
+            f'<p class="body" style="margin-bottom:.8rem">👥 {affected}</p>'
+            f'<div class="two-col">'
+            f'<div><p class="lbl">Temporal Reasoning</p>'
+            f'<p class="body">{p.get("temporal_reasoning","—")}</p>'
+            f'<p class="lbl">Confidence Justification</p>'
+            f'<p class="body cbox">{p.get("confidence_justification","—")}</p></div>'
+            f'<div><p class="lbl">Sessions Involved</p>'
+            f'<div class="badges">{sessions_html}</div>'
+            f'<p class="lbl" style="margin-top:1rem">Reasoning Trace</p>'
+            f'<ol class="trace">{trace_html}</ol></div>'
+            f'</div></div>'
+        )
+
+    n_high     = sum(1 for p in patterns if p.get("confidence","").lower() == "high")
+    n_med      = sum(1 for p in patterns if p.get("confidence","").lower() == "medium")
+    n_low      = sum(1 for p in patterns if p.get("confidence","").lower() == "low")
+    user_names = ", ".join(u.name for u in users)
+
+    return (
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+        f'<title>Clary · Population Report</title>'
+        f'<style>{_SHARED_REPORT_CSS}</style></head><body>'
+        f'<div class="container">'
+        f'<header>'
+        f'<div class="logo">🩺 CLARY · POPULATION ANALYSIS REPORT</div>'
+        f'<div class="pname">All Patients</div>'
+        f'<div class="pmeta">{user_names} · {len(users)} patients · Cross-patient pattern detection</div>'
+        f'</header>'
+        f'<div class="summary">'
+        f'<div class="metric"><span class="mv">{len(patterns)}</span><span class="ml">Patterns</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#10b981">{n_high}</span><span class="ml">High</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#f59e0b">{n_med}</span><span class="ml">Medium</span></div>'
+        f'<div class="metric"><span class="mv" style="color:#ef4444">{n_low}</span><span class="ml">Low</span></div>'
+        f'</div>'
+        f'{cards_html}'
+        f'<footer>Generated by Clary · Ask First · {datetime.now().strftime("%Y-%m-%d %H:%M")}</footer>'
+        f'</div></body></html>'
+    )
 
 
 # ── Data-ingestion animation ──────────────────────────────────────────────────
@@ -488,29 +932,29 @@ def _animate_data_load(user: User) -> None:
 # ── Core streaming render ─────────────────────────────────────────────────────
 
 def _render_assignment_checklist() -> None:
-    """Show the required assignment capabilities in a compact, visible form."""
     st.markdown(
-        "<p style='font-size:0.8em;color:#8b949e;margin:0 0 8px'>ASSIGNMENT CHECKLIST</p>",
+        "<p style='font-size:0.8em;color:#8b949e;margin:0 0 8px'>FEATURES</p>",
         unsafe_allow_html=True,
     )
     st.caption("[x] Streamlit interface")
     st.caption("[x] Chat streaming")
-    st.caption("[x] Separate user ingestion")
-    st.caption("[x] Temporal history understanding")
-    st.caption("[x] JSON pattern output")
-    st.caption("[x] Confidence scoring")
-    st.caption("[x] Reasoning trace")
+    st.caption("[x] Per-patient session ingestion")
+    st.caption("[x] Temporal history reasoning")
+    st.caption("[x] JSON + HTML report export")
+    st.caption("[x] Confidence scoring & trace")
     st.caption("[x] No hardcoded patterns")
+    st.caption("[x] Analysis cache (page-reload safe)")
+    st.caption("[x] Pattern timeline (Plotly)")
+    st.caption("[x] Cross-patient population view")
 
 
 def _render_reasoning_panel(user: User) -> None:
-    """Explain the reasoning flow without adding complexity to the app."""
     with st.expander("How Clary reasons", expanded=False):
         st.markdown(
             f"""
 1. Loads only **{user.name}'s** sessions and sorts them chronologically.
 2. Adds week numbers, day deltas, dates, time-of-day labels, severity, and tags.
-3. Sends the full temporal timeline to NVIDIA Nemotron in one reasoning call.
+3. Sends the full temporal timeline to the configured LLM in one reasoning call.
 4. Asks the model to check recurrence, temporal direction, negative evidence, resolution, and cascades.
 5. Requires JSON patterns with confidence scores and trace steps.
 """
@@ -524,31 +968,94 @@ def _render_raw_timeline(user: User) -> None:
 
 
 def _render_analysis_controls(user: User, content: str) -> None:
-    """Render download and regenerate actions for the selected user's analysis."""
+    """Render download (JSON + HTML) and regenerate actions for the selected user's analysis."""
     json_str = _extract_json(content) if content else None
-    left, right = st.columns([1, 1])
+    col1, col2, col3 = st.columns([1, 1, 1])
 
-    with left:
-        if json_str:
-            data, error = _parse_pattern_json(json_str)
-            if data and not error:
-                st.download_button(
-                    "Download JSON",
-                    data=json.dumps(data, indent=2),
-                    file_name=f"{user.user_id}_patterns.json",
-                    mime="application/json",
-                    use_container_width=True,
-                    key=f"download_{user.user_id}",
-                )
-            else:
-                st.button("Download JSON unavailable", disabled=True, use_container_width=True)
+    data: dict | None = None
+    if json_str:
+        parsed, err = _parse_pattern_json(json_str)
+        if not err:
+            data = parsed
+    sessions = _session_lookup(user)
+
+    with col1:
+        if data:
+            st.download_button(
+                "⬇ Download JSON",
+                data=json.dumps(data, indent=2),
+                file_name=f"{user.user_id}_patterns.json",
+                mime="application/json",
+                use_container_width=True,
+                key=f"download_json_{user.user_id}",
+            )
         else:
-            st.button("Download JSON unavailable", disabled=True, use_container_width=True)
+            st.button("⬇ Download JSON", disabled=True, use_container_width=True,
+                      key=f"download_json_{user.user_id}")
 
-    with right:
-        if st.button("Regenerate Analysis", use_container_width=True, key=f"regen_{user.user_id}"):
+    with col2:
+        if data:
+            html_report = _generate_html_report(data, user, sessions)
+            st.download_button(
+                "⬇ Download HTML",
+                data=html_report,
+                file_name=f"{user.user_id}_report.html",
+                mime="text/html",
+                use_container_width=True,
+                key=f"download_html_{user.user_id}",
+            )
+        else:
+            st.button("⬇ Download HTML", disabled=True, use_container_width=True,
+                      key=f"download_html_{user.user_id}")
+
+    with col3:
+        if st.button("↺ Regenerate", use_container_width=True, key=f"regen_{user.user_id}"):
             st.session_state.chats[user.user_id] = {}
             st.rerun()
+
+
+def _render_cp_analysis_controls(users: list[User], content: str) -> None:
+    """Render download (JSON + HTML) for cross-patient analysis."""
+    json_str = _extract_json(content) if content else None
+    col1, col2 = st.columns([1, 1])
+
+    data: dict | None = None
+    if json_str:
+        try:
+            parsed = json.loads(json_str)
+            if "cross_patient_patterns" in parsed:
+                data = parsed
+        except Exception:
+            pass
+
+    with col1:
+        if data:
+            st.download_button(
+                "⬇ Download JSON",
+                data=json.dumps(data, indent=2),
+                file_name="population_patterns.json",
+                mime="application/json",
+                use_container_width=True,
+                key="download_json_ALL",
+            )
+        else:
+            st.button("⬇ Download JSON", disabled=True, use_container_width=True,
+                      key="download_json_ALL")
+
+    with col2:
+        if data:
+            html_report = _generate_cp_html_report(data, users)
+            st.download_button(
+                "⬇ Download HTML",
+                data=html_report,
+                file_name="population_report.html",
+                mime="text/html",
+                use_container_width=True,
+                key="download_html_ALL",
+            )
+        else:
+            st.button("⬇ Download HTML", disabled=True, use_container_width=True,
+                      key="download_html_ALL")
 
 
 def _do_stream(chat: dict, is_initial: bool = False) -> tuple[str, str]:
@@ -669,6 +1176,111 @@ def _handle_followup(chat: dict, user_input: str) -> None:
     st.rerun()
 
 
+# ── All-patients view ────────────────────────────────────────────────────────
+
+def _render_all_patients_view(users: list[User], chat: dict) -> None:
+    st.markdown(
+        "<h2 style='color:#e6edf3;margin-bottom:2px'>🔬 Population Analysis</h2>"
+        "<p style='color:#6e7681;margin:0;font-size:.85em'>"
+        "Cross-patient pattern detection across all patients</p>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    all_hash = _compute_all_hash(users)
+
+    # Restore from file cache if available
+    if not chat["done"]:
+        cached = _load_analysis_cache("ALL", all_hash)
+        if cached:
+            chat["system"] = build_all_patients_system_prompt(users)
+            init_msg = build_cross_patient_user_message(users)
+            chat["llm_messages"] = [
+                {"role": "user",      "content": init_msg},
+                {"role": "assistant", "content": cached["content"]},
+            ]
+            chat["messages"] = [{
+                "role":     "assistant",
+                "content":  cached["content"],
+                "thinking": cached.get("thinking", ""),
+                "type":     "cp_analysis",
+            }]
+            chat["done"] = True
+            st.rerun()
+
+    if not chat["done"]:
+        chat["system"] = build_all_patients_system_prompt(users)
+        for u in users:
+            _animate_data_load(u)
+        st.divider()
+
+        st.markdown(
+            "<p style='color:#8b949e;font-size:.85em;margin-bottom:4px'>"
+            "🔬&nbsp; CROSS-PATIENT ANALYSIS — streaming</p>",
+            unsafe_allow_html=True,
+        )
+
+        init_msg = build_cross_patient_user_message(users)
+        chat["llm_messages"] = [{"role": "user", "content": init_msg}]
+
+        with st.chat_message("assistant", avatar="🩺"):
+            content, thinking = _do_stream(chat, is_initial=True)
+
+        if content:
+            json_str = _extract_json(content)
+            if json_str:
+                _render_cross_patient_patterns(json_str, users)
+                _render_cp_analysis_controls(users, content)
+            else:
+                st.markdown(content)
+                st.warning(
+                    "Cross-patient JSON not detected. You can still ask follow-up questions."
+                )
+                _render_cp_analysis_controls(users, content)
+
+            chat["messages"] = [{
+                "role":     "assistant",
+                "content":  content,
+                "thinking": thinking,
+                "type":     "cp_analysis",
+            }]
+            chat["llm_messages"].append({"role": "assistant", "content": content})
+            chat["done"] = True
+            _save_analysis_cache("ALL", all_hash, content, thinking)
+
+        st.divider()
+        st.success("✅ Population analysis complete. Ask Clary about cross-patient findings.")
+
+        prompt = st.chat_input("Ask about cross-patient patterns…", key="chat_input_ALL")
+        if prompt:
+            _handle_followup(chat, prompt)
+
+    else:
+        for msg in chat["messages"]:
+            if msg.get("type") == "cp_analysis":
+                with st.chat_message("assistant", avatar="🩺"):
+                    if msg.get("thinking"):
+                        st.markdown(
+                            f"<details><summary>💭 Reasoning trace "
+                            f"({len(msg['thinking'].split())} words) — click to expand</summary>"
+                            f"<pre>{msg['thinking']}</pre></details>",
+                            unsafe_allow_html=True,
+                        )
+                    json_str = _extract_json(msg["content"])
+                    if json_str:
+                        _render_cross_patient_patterns(json_str, users)
+                        _render_cp_analysis_controls(users, msg["content"])
+                    else:
+                        st.markdown(msg["content"])
+                        _render_cp_analysis_controls(users, msg["content"])
+            else:
+                _display_past_message(msg, None)
+
+        prompt = st.chat_input("Ask about cross-patient patterns…", key="chat_input_ALL")
+        if prompt:
+            _handle_followup(chat, prompt)
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 def _render_sidebar(users: list[User]) -> None:
@@ -707,11 +1319,35 @@ def _render_sidebar(users: list[User]) -> None:
                     st.session_state.selected_uid = u.user_id
                     st.rerun()
 
+        st.markdown(
+            "<p style='font-size:0.8em;color:#8b949e;margin:12px 0 8px'>POPULATION</p>",
+            unsafe_allow_html=True,
+        )
+        _is_all = st.session_state.selected_uid == "ALL"
+        _all_cs = st.session_state.chats.get("ALL", {})
+        _all_sfx = "  · ✓" if _all_cs.get("done") else ""
+        if st.button(
+            f"🔬 **All Patients**{_all_sfx}",
+            key="sel_ALL",
+            use_container_width=True,
+            type="primary" if _is_all else "secondary",
+        ):
+            if st.session_state.selected_uid != "ALL":
+                st.session_state.selected_uid = "ALL"
+                st.rerun()
+
         # ── Selected user profile ──────────────────────────────────────────
         st.divider()
         _render_assignment_checklist()
 
-        if st.session_state.selected_uid:
+        if st.session_state.selected_uid == "ALL":
+            if _all_cs.get("done"):
+                st.divider()
+                if st.button("🔄 Reset Population Analysis", use_container_width=True):
+                    st.session_state.chats["ALL"] = {}
+                    st.rerun()
+
+        elif st.session_state.selected_uid:
             uid   = st.session_state.selected_uid
             umap  = {u.user_id: u for u in users}
             user  = umap[uid]
@@ -810,8 +1446,14 @@ def main() -> None:
         _render_welcome(users)
         return
 
-    # ── User selected ─────────────────────────────────────────────────────────
-    uid  = st.session_state.selected_uid
+    # ── All-patients population view ──────────────────────────────────────────
+    uid = st.session_state.selected_uid
+    if uid == "ALL":
+        chat = _get_chat("ALL")
+        _render_all_patients_view(users, chat)
+        return
+
+    # ── Single patient selected ───────────────────────────────────────────────
     user = user_map[uid]
     chat = _get_chat(uid)
 
@@ -828,6 +1470,26 @@ def main() -> None:
     # ── Phase 1: Data ingestion + initial analysis ────────────────────────────
     _render_reasoning_panel(user)
     _render_raw_timeline(user)
+
+    # ── File-based cache restore (survives page reload) ───────────────────────
+    _user_hash = _compute_user_hash(user)
+    if not chat["done"]:
+        _cached = _load_analysis_cache(uid, _user_hash)
+        if _cached:
+            chat["system"] = build_system_prompt(user)
+            _init_msg = build_initial_user_message(user)
+            chat["llm_messages"] = [
+                {"role": "user",      "content": _init_msg},
+                {"role": "assistant", "content": _cached["content"]},
+            ]
+            chat["messages"] = [{
+                "role":     "assistant",
+                "content":  _cached["content"],
+                "thinking": _cached.get("thinking", ""),
+                "type":     "analysis",
+            }]
+            chat["done"] = True
+            st.rerun()
 
     if not chat["done"]:
         # Build and cache the system prompt (full timeline embedded)
@@ -866,7 +1528,7 @@ def main() -> None:
                 )
                 _render_analysis_controls(user, content)
 
-            # Persist to state
+            # Persist to state and save to file cache
             chat["messages"].append({
                 "role":     "assistant",
                 "content":  content,
@@ -875,6 +1537,7 @@ def main() -> None:
             })
             chat["llm_messages"].append({"role": "assistant", "content": content})
             chat["done"] = True
+            _save_analysis_cache(uid, _user_hash, content, thinking)
 
         st.divider()
         st.success(

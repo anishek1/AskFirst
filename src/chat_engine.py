@@ -7,6 +7,7 @@ Each user gets an independent conversation context that includes:
  - Streaming support for both thinking traces and response content
 """
 
+import json
 import os
 from typing import Generator
 
@@ -131,6 +132,103 @@ def build_system_prompt(user: User) -> str:
 def build_initial_user_message(user: User) -> str:
     """Build the first user turn that triggers the initial pattern analysis."""
     return INITIAL_ANALYSIS_TEMPLATE.format(user_name=user.name)
+
+
+# ── Cross-patient prompts ─────────────────────────────────────────────────────
+
+CROSS_PATIENT_SYSTEM_TEMPLATE = """\
+You are Clary, the AI health pattern analyst for the Ask First platform.\
+ You have access to ALL patients' complete conversation histories, each pre-processed\
+ with exact temporal metadata.
+
+## Your Role
+Find health patterns that recur across MULTIPLE patients — population-level signals\
+ that no single patient's history alone could reveal.\
+ Answer follow-up questions with the same analytical depth.
+
+## Temporal Reasoning Rules
+1. Always cite patient name + session ID (e.g., Meera USR002_S03) and date.
+2. State time deltas per patient: "Meera S03 (Jan 22, Day 17) → S05 (Feb 10, Day 36) = 19-day lag".
+3. Temporal direction is causal: trigger must precede symptom in EACH patient's data.
+4. Check negative evidence within each patient's timeline separately.
+5. Note differences: same pattern but different lag, severity, or context across patients.
+6. Known biological delays: telogen effluvium 42–84 d; blood sugar crash 1–3 h;\
+ stress → PMS days–weeks; sleep deprivation → anxiety cumulative over weeks.
+
+## Confidence Rubric
+- **HIGH**: 3+ patients, OR 2 patients each with 2+ consistent episodes PLUS negative evidence
+- **MEDIUM**: 2 patients each with at least 1 consistent episode
+- **LOW**: 2 patients with 1 episode each, or plausible mechanism with limited data
+
+## Pre-Computed Temporal Timelines
+
+{timelines}
+
+---
+For the **initial analysis**: output ALL cross-patient findings as JSON inside ```json … ``` fences.
+For **follow-up questions**: respond conversationally, citing patient names, session IDs, and day deltas.\
+"""
+
+CROSS_PATIENT_ANALYSIS_TEMPLATE = """\
+Perform a cross-patient population pattern analysis across all {n_users} patients: {user_names}.
+
+Goal: identify trigger→symptom patterns that recur across 2 or more patients.
+
+Steps:
+1. For each patient list dominant recurring symptoms and their triggers.
+2. Find triggers or symptoms appearing in 2+ patients' timelines.
+3. For each candidate: verify temporal direction holds in EACH patient. Cite sessions.
+4. Note differences in lag, severity, or resolution across patients.
+5. Apply the confidence rubric strictly. Do not inflate confidence.
+6. Merge overlapping patterns into a single root-cause pattern when possible.
+
+Evidence gate: every session cited must actually contain the trigger or symptom. \
+Do not include speculative patterns without explicit session evidence from ≥2 patients.
+
+Output JSON in ```json … ``` fences:
+
+```json
+{{
+  "analysis_type": "cross_patient",
+  "users_analyzed": {user_ids},
+  "cross_patient_patterns": [
+    {{
+      "pattern_id": "CP1",
+      "title": "Trigger → Symptom (concise)",
+      "users_affected": ["USR002 (Meera)", "USR003 (Priya)"],
+      "sessions_involved": ["USR002_S03", "USR002_S07", "USR003_S02", "USR003_S05"],
+      "temporal_reasoning": "Cross-patient narrative. Meera S03 (Jan 22, Day 17): work deadline → cramps same day. Priya S02 (Jan 15, Day 10): project deadline → cramps within 2 days.",
+      "confidence": "medium",
+      "confidence_justification": "2 patients, each 2+ consistent episodes; same trigger (acute work stress) preceding cramps within 0–2 days",
+      "trace": [
+        "Meera: work stress in S03, S07 → cramps within 0–1 days each time",
+        "Priya: work deadline in S02, S05 → cramps within 0–2 days",
+        "Lag difference: Meera same-day, Priya up to 2 days — plausible stress hormone pathway"
+      ]
+    }}
+  ]
+}}
+```\
+"""
+
+
+def build_all_patients_system_prompt(users: list) -> str:
+    sections = []
+    for user in users:
+        timeline = build_temporal_timeline(user)
+        sections.append(f"### {user.name} ({user.user_id})\n\n{timeline}")
+    combined = "\n\n---\n\n".join(sections)
+    return CROSS_PATIENT_SYSTEM_TEMPLATE.format(timelines=combined)
+
+
+def build_cross_patient_user_message(users: list) -> str:
+    names    = ", ".join(u.name for u in users)
+    ids_json = json.dumps([u.user_id for u in users])
+    return CROSS_PATIENT_ANALYSIS_TEMPLATE.format(
+        n_users=len(users),
+        user_names=names,
+        user_ids=ids_json,
+    )
 
 
 def stream_response(
