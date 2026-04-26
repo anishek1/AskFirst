@@ -10,11 +10,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-try:
-    for _k, _v in st.secrets.items():
-        os.environ.setdefault(_k, str(_v))
-except Exception:
-    pass
+_SECRET_KEYS = [
+    "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
+    "LLM_MAX_TOKENS", "LLM_TEMPERATURE", "LLM_TOP_P", "LLM_SEED",
+    "LLM_THINKING_ENABLED", "LLM_REASONING_BUDGET",
+]
+for _k in _SECRET_KEYS:
+    if _k in st.secrets:
+        os.environ[_k] = str(st.secrets[_k])
 
 from src.data_loader import load_dataset, User
 from src.llm_provider import get_provider
