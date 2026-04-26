@@ -52,8 +52,8 @@ Hosted deployment: https://askfirst-clary.streamlit.app/
 | `LLM_API_KEY` | — | API key for the provider |
 | `LLM_BASE_URL` | NVIDIA NIM URL for NVIDIA models | Optional; for OpenAI-compatible endpoints |
 | `LLM_MAX_TOKENS` | `16384` | Max output tokens per reasoning call |
-| `LLM_TEMPERATURE` | `0` | Deterministic decoding for stable pattern finding |
-| `LLM_TOP_P` | `1` | Nucleus sampling cap; keep `1` with temperature `0` |
+| `LLM_TEMPERATURE` | `0.25` | Deterministic decoding for stable pattern finding |
+| `LLM_TOP_P` | `0.75` | Nucleus sampling cap; keep `1` with temperature `0` |
 | `LLM_SEED` | — | Optional seed for reproducible outputs |
 | `LLM_THINKING_ENABLED` | `false` | Enable extended thinking (OpenAI-compatible providers with reasoning_content) |
 | `LLM_REASONING_BUDGET` | `16384` | Token budget for reasoning traces (when thinking is enabled) |
