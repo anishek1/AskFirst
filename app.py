@@ -15,9 +15,14 @@ _SECRET_KEYS = [
     "LLM_MAX_TOKENS", "LLM_TEMPERATURE", "LLM_TOP_P", "LLM_SEED",
     "LLM_THINKING_ENABLED", "LLM_REASONING_BUDGET",
 ]
+_secrets_loaded = []
 for _k in _SECRET_KEYS:
     if _k in st.secrets:
         os.environ[_k] = str(st.secrets[_k])
+        _secrets_loaded.append(_k)
+
+_api_key = os.environ.get("LLM_API_KEY", "")
+_DEBUG_INFO = f"Secrets loaded: {_secrets_loaded} | Key length: {len(_api_key)} | Key prefix: {_api_key[:8]}"
 
 from src.data_loader import load_dataset, User
 from src.llm_provider import get_provider
@@ -1284,6 +1289,7 @@ def _render_sidebar(users: list[User]) -> None:
             unsafe_allow_html=True,
         )
         st.caption("Ask First · Health Pattern Analyst")
+        st.caption(f"DEBUG: {_DEBUG_INFO}")
         st.divider()
 
         st.markdown(
