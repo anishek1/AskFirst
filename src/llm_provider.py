@@ -208,6 +208,17 @@ def get_provider() -> LLMProvider:
             top_p=top_p,
             seed=seed,
         )
+    elif provider_name == "groq":
+        return OpenAIProvider(
+            api_key=api_key,
+            model=model or "llama-3.3-70b-versatile",
+            base_url="https://api.groq.com/openai/v1",
+            thinking_enabled=False,
+            reasoning_budget=0,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+        )
     elif provider_name == "gemini":
         return GeminiProvider(
             api_key=api_key,
