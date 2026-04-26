@@ -1005,6 +1005,12 @@ def _render_analysis_controls(user: User, content: str) -> None:
     with col3:
         if st.button("↺ Regenerate", use_container_width=True, key=f"regen_{user.user_id}"):
             st.session_state.chats[user.user_id] = {}
+            # Also delete the disk cache so the file-based restore doesn't immediately
+            # reload the old analysis on the next rerun.
+            _user_hash = _compute_user_hash(user)
+            _disk_cache = _cache_path(user.user_id, _user_hash)
+            if _disk_cache.exists():
+                _disk_cache.unlink()
             st.rerun()
 
 
@@ -1386,6 +1392,37 @@ def _render_sidebar(users: list[User]) -> None:
                 if st.button("🔄 Reset Analysis", use_container_width=True):
                     st.session_state.chats[uid] = {}
                     st.rerun()
+
+        # ── Danger zone ────────────────────────────────────────────────────
+        st.divider()
+        st.markdown(
+            "<p style='font-size:0.75em;color:#7f1d1d;font-weight:700;"
+            "letter-spacing:0.08em;margin:0 0 6px'>⚠ DANGER ZONE</p>",
+            unsafe_allow_html=True,
+        )
+        _cached_files = list(CACHE_DIR.glob("*.json")) if CACHE_DIR.exists() else []
+        _n_cached = len(_cached_files)
+        _cache_label = (
+            f"🗑 Clear Disk Cache ({_n_cached} file{'s' if _n_cached != 1 else ''})"
+            if _n_cached else "🗑 Disk Cache (empty)"
+        )
+        if st.button(
+            _cache_label,
+            use_container_width=True,
+            disabled=(_n_cached == 0),
+            key="clear_disk_cache",
+        ):
+            for _f in _cached_files:
+                _f.unlink(missing_ok=True)
+            # Also reset all in-memory chat state so nothing stale lingers
+            st.session_state.chats = {}
+            st.toast("🗑 Disk cache cleared.", icon="✅")
+            st.rerun()
+        if _n_cached:
+            st.caption(
+                f"{_n_cached} cached analysis file{'s' if _n_cached != 1 else ''} "
+                f"in `.clary_cache/`. Clearing forces a fresh LLM call for all patients."
+            )
 
 
 # ── Welcome screen ────────────────────────────────────────────────────────────
