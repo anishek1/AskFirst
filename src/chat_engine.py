@@ -1,12 +1,3 @@
-"""
-chat_engine.py — Manages multi-turn conversation state and streaming for Clary.
-
-Each user gets an independent conversation context that includes:
- - Full pre-computed temporal timeline injected into the system prompt
- - Persistent LLM message history for multi-turn Q&A
- - Streaming support for both thinking traces and response content
-"""
-
 import json
 import os
 from typing import Generator

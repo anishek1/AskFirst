@@ -1,18 +1,3 @@
-"""
-app.py — Clary: Health Pattern Analyst (Conversational Streamlit App)
-
-Two analysis modes:
-  • Single patient  — select Arjun, Meera, or Priya from the sidebar.
-  • All Patients    — cross-patient population analysis via the 🔬 button.
-
-Both modes support:
-  • File-based analysis cache (survives page reload, keyed by session hash).
-  • Streaming LLM response with live reasoning trace.
-  • Plotly pattern timeline visualisation.
-  • JSON and HTML report export.
-  • Unlimited multi-turn follow-up chat; full history preserved per patient.
-"""
-
 import hashlib
 import json
 import os

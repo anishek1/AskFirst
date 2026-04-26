@@ -1,11 +1,3 @@
-"""
-llm_provider.py — Abstract LLM provider with Anthropic / OpenAI / Gemini / Ollama backends.
-
-Each provider exposes one method:
-  chat_stream  — multi-turn, accepts message history list
-
-Yields: ("thinking", chunk) | ("content", chunk)
-"""
 
 from abc import ABC, abstractmethod
 from typing import Generator
